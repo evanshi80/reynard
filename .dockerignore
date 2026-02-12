@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+data
+logs
+.env
+.git
+.gitignore
+README.md
+tsconfig.json
+src

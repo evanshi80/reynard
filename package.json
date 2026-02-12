@@ -1,0 +1,53 @@
+{
+  "name": "reynard",
+  "version": "2.0.0",
+  "description": "Windows WeChat monitor with vision-based message collection using local LLM (Ollama) or cloud APIs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "dev:watch": "nodemon --exec tsx src/index.ts",
+    "clean": "rimraf dist",
+    "prebuild": "npm run clean",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "wechat",
+    "vision",
+    "ollama",
+    "llm",
+    "monitor",
+    "screenshot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.74.0",
+    "axios": "^1.13.4",
+    "better-sqlite3": "^12.6.2",
+    "canvas": "^3.2.1",
+    "clipboardy": "^5.2.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "koffi": "^2.15.1",
+    "openai": "^6.18.0",
+    "robotjs": "^0.6.0",
+    "screenshot-desktop": "^1.15.3",
+    "sharp": "^0.34.5",
+    "tesseract.js": "^7.0.0",
+    "winston": "^3.19.0",
+    "winston-daily-rotate-file": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.2.1",
+    "nodemon": "^3.1.11",
+    "rimraf": "^6.1.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

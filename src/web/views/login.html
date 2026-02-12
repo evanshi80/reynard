@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reynard Monitor - 微信监控</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .header {
+            max-width: 1200px;
+            margin: 0 auto 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            color: white;
+        }
+
+        .logo {
+            font-size: 48px;
+        }
+
+        .logo-text h1 {
+            font-size: 28px;
+            margin-bottom: 5px;
+        }
+
+        .logo-text p {
+            opacity: 0.8;
+            font-size: 14px;
+        }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+        }
+
+        .nav a {
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            background: rgba(255,255,255,0.2);
+            transition: background 0.3s;
+        }
+
+        .nav a:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        .main-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 25px;
+        }
+
+        .card h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 20px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .status-item {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+        }
+
+        .status-item .value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .status-item .label {
+            color: #666;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        .status-item.running .value {
+            color: #28a745;
+        }
+
+        .status-item.error .value {
+            color: #dc3545;
+        }
+
+        .status-item.warning .value {
+            color: #ffc107;
+        }
+
+        .provider-info {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+
+        .provider-info .name {
+            font-weight: bold;
+            color: #333;
+            font-size: 18px;
+        }
+
+        .provider-info .status {
+            margin-top: 5px;
+        }
+
+        .provider-info .status.available {
+            color: #28a745;
+        }
+
+        .provider-info .status.unavailable {
+            color: #dc3545;
+        }
+
+        .config-section {
+            margin-top: 15px;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .config-item:last-child {
+            border-bottom: none;
+        }
+
+        .config-item .key {
+            color: #666;
+        }
+
+        .config-item .value {
+            color: #333;
+            font-weight: 500;
+        }
+
+        .recent-messages {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .message-item {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+
+        .message-item .meta {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .message-item .content {
+            color: #333;
+            word-break: break-all;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin: 5px;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5a6fd6;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c82333;
+        }
+
+        .actions {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .log-viewer {
+            background: #1e1e1e;
+            border-radius: 10px;
+            padding: 15px;
+            color: #d4d4d4;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .log-viewer .log-line {
+            margin: 2px 0;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+
+        .log-viewer .log-info {
+            color: #4fc3f7;
+        }
+
+        .log-viewer .log-success {
+            color: #66bb6a;
+        }
+
+        .log-viewer .log-error {
+            color: #ef5350;
+        }
+
+        .log-viewer .log-warn {
+            color: #ffca28;
+        }
+
+        .refresh-hint {
+            color: #999;
+            font-size: 12px;
+            text-align: center;
+            margin-top: 15px;
+        }
+
+        @media (max-width: 768px) {
+            .main-container {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo-section">
+            <div class="logo">🦊</div>
+            <div class="logo-text">
+                <h1>Reynard Monitor</h1>
+                <p>Windows 微信监控 + 视觉识别</p>
+            </div>
+        </div>
+        <div class="nav">
+            <a href="/">监控面板</a>
+            <a href="/api/health" target="_blank">健康检查</a>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <!-- 状态卡片 -->
+        <div class="card">
+            <h2>📊 监控状态</h2>
+            <div class="status-grid">
+                <div class="status-item" id="runningStatus">
+                    <div class="value" id="runningValue">-</div>
+                    <div class="label">运行状态</div>
+                </div>
+                <div class="status-item">
+                    <div class="value" id="collectedValue">0</div>
+                    <div class="label">已收集消息</div>
+                </div>
+                <div class="status-item warning">
+                    <div class="value" id="errorsValue">0</div>
+                    <div class="label">错误次数</div>
+                </div>
+                <div class="status-item">
+                    <div class="value" id="cacheValue">0</div>
+                    <div class="label">缓存消息</div>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button class="btn btn-primary" onclick="clearCache()">清空缓存</button>
+            </div>
+
+            <p class="refresh-hint">页面每 5 秒自动刷新</p>
+        </div>
+
+        <!-- 提供商信息 -->
+        <div class="card">
+            <h2>🤖 视觉识别提供商</h2>
+            <div class="provider-info">
+                <div class="name" id="providerName">加载中...</div>
+                <div class="status" id="providerStatus">检查中...</div>
+            </div>
+
+            <div class="config-section">
+                <div class="config-item">
+                    <span class="key">提供商类型</span>
+                    <span class="value" id="configProvider">-</span>
+                </div>
+                <div class="config-item">
+                    <span class="key">模型</span>
+                    <span class="value" id="configModel">-</span>
+                </div>
+                <div class="config-item">
+                    <span class="key">截图间隔</span>
+                    <span class="value" id="configInterval">-</span>
+                </div>
+                <div class="config-item">
+                    <span class="key">目标窗口</span>
+                    <span class="value" id="configWindow">-</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 最近消息 -->
+        <div class="card">
+            <h2>💬 最近消息</h2>
+            <div class="recent-messages" id="recentMessages">
+                <p style="color: #999; text-align: center;">暂无消息</p>
+            </div>
+        </div>
+
+        <!-- 日志 -->
+        <div class="card">
+            <h2>📋 运行日志</h2>
+            <div class="log-viewer" id="logViewer">
+                <div class="log-line log-info">[系统] 等待数据...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let messages = [];
+        const MAX_MESSAGES = 20;
+
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                // 更新运行状态
+                const runningEl = document.getElementById('runningValue');
+                const runningStatus = document.getElementById('runningStatus');
+                if (data.monitor && data.monitor.running) {
+                    runningEl.textContent = '运行中';
+                    runningStatus.classList.add('running');
+                } else {
+                    runningEl.textContent = '已停止';
+                    runningStatus.classList.remove('running');
+                }
+
+                // 更新统计
+                document.getElementById('collectedValue').textContent =
+                    (data.monitor?.messagesCollected || 0).toLocaleString();
+                document.getElementById('errorsValue').textContent =
+                    (data.monitor?.errors || 0).toLocaleString();
+                document.getElementById('cacheValue').textContent =
+                    (data.monitor?.seenCount || 0).toLocaleString();
+
+                // 更新提供商信息
+                document.getElementById('providerName').textContent =
+                    data.vision?.provider || '未知';
+                const statusEl = document.getElementById('providerStatus');
+                if (data.vision?.available) {
+                    statusEl.textContent = '✅ 已连接';
+                    statusEl.className = 'status available';
+                } else {
+                    statusEl.textContent = '❌ 未连接';
+                    statusEl.className = 'status unavailable';
+                }
+
+                // 更新配置
+                document.getElementById('configProvider').textContent =
+                    data.vision?.provider || '-';
+                document.getElementById('configModel').textContent =
+                    data.vision?.model || '-';
+                document.getElementById('configInterval').textContent =
+                    data.capture?.interval ? `${data.capture.interval}ms` : '-';
+                document.getElementById('configWindow').textContent =
+                    data.capture?.windowName || '-';
+
+                // 更新最近消息
+                if (data.messages && data.messages.length > 0) {
+                    messages = data.messages.slice(-MAX_MESSAGES);
+                    const container = document.getElementById('recentMessages');
+                    container.innerHTML = messages.map(msg => `
+                        <div class="message-item">
+                            <div class="meta">
+                                <span>${msg.roomName}</span>
+                                <span>${msg.talkerName}</span>
+                            </div>
+                            <div class="content">${escapeHtml(msg.content)}</div>
+                        </div>
+                    `).reverse().join('');
+                }
+
+                // 更新日志
+                if (data.logs && data.logs.length > 0) {
+                    const logViewer = document.getElementById('logViewer');
+                    logViewer.innerHTML = data.logs.map(log =>
+                        `<div class="log-line log-${log.level}">[${log.time}] ${log.message}</div>`
+                    ).join('');
+                }
+
+            } catch (error) {
+                console.error('Failed to fetch status:', error);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function clearCache() {
+            try {
+                await fetch('/api/monitor/clear', { method: 'POST' });
+                messages = [];
+                updateStatus();
+            } catch (error) {
+                console.error('Failed to clear cache:', error);
+            }
+        }
+
+        // 初始加载
+        updateStatus();
+
+        // 自动刷新
+        setInterval(updateStatus, 5000);
+    </script>
+</body>
+</html>

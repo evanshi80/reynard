@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build:*)",
+      "Bash(npm run dev:*)",
+      "WebSearch",
+      "Bash(curl:*)",
+      "Bash(ollama list)",
+      "Bash(node:*)",
+      "Bash(timeout:*)",
+      "Bash(powershell:*)",
+      "Bash(dir:*)",
+      "Bash(del:*)",
+      "Bash(dotnet new:*)",
+      "Bash(dotnet run)",
+      "Bash(findstr:*)",
+      "Bash(set:*)",
+      "Bash(npm install:*)",
+      "WebFetch(domain:koffi.dev)",
+      "Bash(sqlite3:*)",
+      "Bash(ping:*)",
+      "Bash(npx tsc:*)",
+      "Bash(\"C:\\\\Users\\\\lobst\\\\AppData\\\\Local\\\\Programs\\\\AutoHotkey\\\\v2\\\\AutoHotkey64.exe\" \"C:\\\\Users\\\\lobst\\\\foxdenlab\\\\reynard\\\\scripts\\\\wechat.ahk\" search \"文件传输助手\")",
+      "Bash(npx tsx:*)",
+      "Bash(LOG_LEVEL=debug npx tsx:*)",
+      "Bash(npx ts-node:*)",
+      "Bash(netstat:*)",
+      "Bash(npx:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(__NEW_LINE_698582e4b18f5d01__)"
+    ]
+  }
+}
