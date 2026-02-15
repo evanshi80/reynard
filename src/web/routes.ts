@@ -3,6 +3,7 @@ import { config } from '../config';
 import { getMonitor } from '../capture/monitor';
 import { createVisionProvider } from '../vision/providers';
 import { getDatabase } from '../database/client';
+import { getRecentLogs } from '../utils/logger';
 import * as wechat from '../wechat';
 import path from 'path';
 import logger from '../utils/logger';
@@ -81,6 +82,9 @@ export function createRoutes(): Router {
         timestamp: number;
       }>;
 
+      // Get recent logs
+      const recentLogs = getRecentLogs(20);
+
       const response: StatusResponse = {
         monitor: {
           running: monitor.getStatus().running,
@@ -106,7 +110,7 @@ export function createRoutes(): Router {
           content: m.content,
           timestamp: m.timestamp,
         })),
-        logs: [],
+        logs: recentLogs,
       };
 
       res.json(response);
@@ -254,6 +258,18 @@ export function createRoutes(): Router {
     res.json({
       ahkAvailable: wechat.isAhkAvailable(),
     });
+  });
+
+  // API: Get recent logs
+  router.get('/api/logs', (req: Request, res: Response) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 20;
+      const logs = getRecentLogs(limit);
+      res.json({ logs });
+    } catch (error) {
+      logger.error('Failed to get logs:', error);
+      res.status(500).json({ error: 'Failed to get logs' });
+    }
   });
 
   // API: Health check

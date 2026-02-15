@@ -9,6 +9,7 @@ import { getCapturer } from '../capture/screenshot';
 import { recognizeTimestamps } from '../wechat/ocr';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 
 // Track which targets have been greeted
 const greetedTargets = new Set<string>();
@@ -17,9 +18,9 @@ const greetedTargets = new Set<string>();
 const lastPatrolTime: Map<string, number> = new Map();
 
 // Checkpoint file for timestamps
-const CHECKPOINT_DIR = path.join(config.capture.screenshotDir, 'checkpoints');
+export const CHECKPOINT_DIR = path.join(config.capture.screenshotDir, 'checkpoints');
 
-interface Checkpoint {
+export interface Checkpoint {
   timestamp: number;  // Unix timestamp when checkpoint was saved
   timeStr: string;    // Last recognized time string (e.g., "21:35" or "1/15 21:35")
   year?: number;
@@ -29,12 +30,12 @@ interface Checkpoint {
   minute: number;
 }
 
-function getCheckpointPath(targetName: string): string {
+export function getCheckpointPath(targetName: string): string {
   const safeName = targetName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
   return path.join(CHECKPOINT_DIR, `checkpoint_${safeName}.json`);
 }
 
-function loadCheckpoint(targetName: string): Checkpoint | null {
+export function loadCheckpoint(targetName: string): Checkpoint | null {
   try {
     const filepath = getCheckpointPath(targetName);
     if (fs.existsSync(filepath)) {
@@ -48,7 +49,7 @@ function loadCheckpoint(targetName: string): Checkpoint | null {
   return null;
 }
 
-function saveCheckpoint(targetName: string, checkpoint: Checkpoint): void {
+export function saveCheckpoint(targetName: string, checkpoint: Checkpoint): void {
   try {
     if (!fs.existsSync(CHECKPOINT_DIR)) {
       fs.mkdirSync(CHECKPOINT_DIR, { recursive: true });
@@ -59,6 +60,112 @@ function saveCheckpoint(targetName: string, checkpoint: Checkpoint): void {
   } catch (error) {
     logger.warn(`Failed to save checkpoint for ${targetName}:`, error);
   }
+}
+
+/**
+ * Fuzzy match weekday OCR errors
+ * Handles "是期三" -> 周三, etc.
+ */
+function parseWeekdayForCheckpoint(text: string): number | null {
+  const clean = text.replace(/\s+/g, '');
+
+  const charMap: { [key: string]: number } = {
+    '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7,
+    'Z': 3, 'z': 3, '2': 2, '_': 3, '-': 3, '?': 0, 'S': 3, 's': 3,
+  };
+
+  const patterns = [
+    /周([一二三四五六日Zz2_\-S])/,
+    /星期([一二三四五六日Zz2_\-S])/,
+    /是期([一二三四五六日Zz2_\-S])/,  // OCR error
+  ];
+
+  for (const pattern of patterns) {
+    const match = clean.match(pattern);
+    if (match) {
+      const char = match[1];
+      return charMap[char] || null;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Create a Checkpoint from VLM message time string
+ * Handles: "HH:mm", "昨天 HH:mm", "周一 HH:mm", "M/d HH:mm", "M月d日 HH:mm"
+ */
+export function createCheckpointFromTimeStr(timeStr: string, timestamp: number): Checkpoint {
+  // Clean the time string
+  const clean = timeStr.replace(/\s+/g, ' ').trim();
+
+  let month: number | undefined;
+  let day: number | undefined;
+  let year: number | undefined;
+  let hour: number = 0;
+  let minute: number = 0;
+
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentDay = now.getDay(); // 0=周日, 1=周一
+
+  // Extract time first
+  const timeMatch = clean.match(/(\d{1,2}):(\d{2})/);
+  if (timeMatch) {
+    hour = parseInt(timeMatch[1], 10);
+    minute = parseInt(timeMatch[2], 10);
+  }
+
+  // Check for relative dates first (昨天/昨日, 星期X)
+  if (clean.includes('昨天') || clean.includes('昨日')) {
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    year = yesterday.getFullYear();
+    month = yesterday.getMonth() + 1;
+    day = yesterday.getDate();
+  }
+  // 周一, 周二, etc. with fuzzy matching for OCR errors
+  else if (clean.includes('周') || clean.includes('是期')) {
+    const weekday = parseWeekdayForCheckpoint(clean);
+    if (weekday !== null) {
+      const targetWeekday = weekday === 0 ? 0 : weekday;
+      const diff = (targetWeekday - currentDay + 7) % 7 || 7; // days ago
+      const targetDate = new Date(now);
+      targetDate.setDate(now.getDate() - diff);
+      year = targetDate.getFullYear();
+      month = targetDate.getMonth() + 1;
+      day = targetDate.getDate();
+      logger.debug(`[debug] Weekday parsed: ${weekday}, date: ${year}/${month}/${day}`);
+    }
+  }
+  // Check for explicit date formats
+  else {
+    // YYYY/M/d or YYYY-M-d
+    const fullDateMatch = clean.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (fullDateMatch) {
+      year = parseInt(fullDateMatch[1], 10);
+      month = parseInt(fullDateMatch[2], 10);
+      day = parseInt(fullDateMatch[3], 10);
+    } else {
+      // M/d or M月d日
+      const dateMatch = clean.match(/(\d{1,2})[\/\月](\d{1,2})/);
+      if (dateMatch) {
+        month = parseInt(dateMatch[1], 10);
+        day = parseInt(dateMatch[2], 10);
+        year = currentYear;
+      }
+    }
+  }
+
+  return {
+    timestamp,
+    timeStr,
+    year,
+    month,
+    day,
+    hour,
+    minute,
+  };
 }
 
 /**
@@ -145,6 +252,7 @@ function findNewestTimestamp(
   if (!newestResult || !newestResult.parsed) return null;
 
   const { month, day: d, year, hour, minute } = newestResult.parsed;
+  logger.debug(`[findNewest] result: timeStr="${newestResult.text}", parsed: year=${year}, month=${month}, day=${d}, hour=${hour}, minute=${minute}`);
   return {
     y: newestResult.y,
     checkpoint: {
@@ -160,9 +268,29 @@ function findNewestTimestamp(
 }
 
 /**
- * Capture screenshot of current chat window
+ * Format checkpoint time for use in filename
+ * Format: YYYYMMDD_HHmm (e.g., 20260212_2135)
  */
-async function captureCurrentChat(targetName: string, suffix?: string): Promise<string | null> {
+function formatCheckpointTimeForFilename(checkpoint: Checkpoint | undefined): string {
+  if (!checkpoint) {
+    // Return a placeholder that will sort before any valid checkpoint
+    return '00000000_0000';
+  }
+  const year = checkpoint.year || new Date().getFullYear();
+  const month = String(checkpoint.month || new Date().getMonth() + 1).padStart(2, '0');
+  const day = String(checkpoint.day || new Date().getDate()).padStart(2, '0');
+  const hour = String(checkpoint.hour || 0).padStart(2, '0');
+  const minute = String(checkpoint.minute || 0).padStart(2, '0');
+  return `${year}${month}${day}_${hour}${minute}`;
+}
+
+/**
+ * Capture screenshot of current chat window
+ * @param targetName - Target name for filename
+ * @param suffix - Screenshot index suffix
+ * @param checkpoint - Optional checkpoint time to include in filename
+ */
+async function captureCurrentChat(targetName: string, suffix: string, checkpoint?: Checkpoint): Promise<string | null> {
   try {
     const pngBuffer = await getCapturer().captureFullChatArea();
     if (!pngBuffer) {
@@ -170,20 +298,21 @@ async function captureCurrentChat(targetName: string, suffix?: string): Promise<
       return null;
     }
 
-    // Save screenshot
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const safeName = targetName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
-    const filename = `patrol_${safeName}_${timestamp}${suffix ? '_' + suffix : ''}.png`;
     const patrolDir = path.join(config.capture.screenshotDir, 'patrol');
 
     if (!fs.existsSync(patrolDir)) {
       fs.mkdirSync(patrolDir, { recursive: true });
     }
 
+    // Format checkpoint time for filename (or use placeholder if no checkpoint yet)
+    const checkpointTime = formatCheckpointTimeForFilename(checkpoint);
+    const filename = `patrol_${safeName}_${checkpointTime}_${suffix}.png`;
     const filepath = path.join(patrolDir, filename);
+
     fs.writeFileSync(filepath, pngBuffer);
 
-    logger.info(`Screenshot: ${targetName}${suffix ? ' (' + suffix + ')' : ''} -> ${filepath}`);
+    logger.info(`Screenshot: ${targetName} (${suffix}) checkpoint=${checkpointTime} -> ${filepath}`);
     return filepath;
   } catch (error) {
     logger.error('Failed to capture screenshot:', error);
@@ -195,30 +324,39 @@ async function captureCurrentChat(targetName: string, suffix?: string): Promise<
  * Navigate to a target and capture screenshots with timestamp-based checkpoint
  * Sends greeting on first visit only if enabled
  */
-async function patrolTarget(target: { name: string; category: string }): Promise<boolean> {
+async function patrolTarget(target: { name: string; category: string }, win: { x: number; y: number; width: number; height: number }): Promise<boolean> {
   try {
     logger.info(`Patrol: ${target.name} (${target.category})`);
+
+    // Check window still exists before any AHK operations
+    const windowFinder = getCapturer().getWindowFinder();
+    const currentWin = windowFinder.findWeChatWindow();
+    if (!currentWin) {
+      logger.warn(`WeChat window no longer exists, skipping ${target.name}`);
+      return false;
+    }
 
     // Load previous checkpoint
     const lastCheckpoint = loadCheckpoint(target.name);
 
     // Wrap entire AHK sequence in lock to prevent interleaving
     return await withAhkLock(async () => {
+      // Re-check window before AHK operations
+      const winBeforeAhk = windowFinder.findWeChatWindow();
+      if (!winBeforeAhk) {
+        logger.warn(`WeChat window disappeared before AHK operations for ${target.name}`);
+        return false;
+      }
+
       // Navigate to target
+      logger.info(`[patrol] Calling typeSearch for: ${target.name}`);
       const searchResult = await typeSearch(target.name);
+      logger.info(`[patrol] typeSearch result: ${searchResult.success}, message: ${searchResult.message}`);
       if (!searchResult.success) {
         logger.warn(`Failed to type search for ${target.name}, skipping...`);
         return false;
       }
       await new Promise(r => setTimeout(r, config.ocr.searchLoadWait));
-
-      // Find window via shared capturer's WindowFinder
-      const windowFinder = getCapturer().getWindowFinder();
-      const win = windowFinder.findWeChatWindow();
-      if (!win) {
-        logger.warn(`Could not find window for ${target.name}`);
-        return false;
-      }
 
       // Use OCR to find category position in sidebar (upper part only)
       const { findCategoryPosition } = await import('../wechat/ocr');
@@ -249,6 +387,13 @@ async function patrolTarget(target: { name: string; category: string }): Promise
       // Import scroll functions
       const { scrollToTop, scrollUp } = await import('../wechat/ahkBridge');
 
+      // Check window before scrolling
+      const winBeforeScroll = windowFinder.findWeChatWindow();
+      if (!winBeforeScroll) {
+        logger.warn(`WeChat window disappeared before scrolling for ${target.name}`);
+        return false;
+      }
+
       // Scroll to bottom first (latest messages), pass window coordinates for dynamic click
       await scrollToTop(win.x, win.y, win.width, win.height);
       await new Promise(r => setTimeout(r, 300));
@@ -260,12 +405,32 @@ async function patrolTarget(target: { name: string; category: string }): Promise
       // Capture and check timestamps
       let screenshotIndex = 0;
       let newestCheckpoint: Checkpoint | null = null;
-      const MAX_SCROLLS = 10; // Safety limit
 
-      for (let scrollCount = 0; scrollCount < MAX_SCROLLS; scrollCount++) {
+      // Has CP: scroll until we reach it (no hard limit, rely on checkpoint + stuck detection)
+      // No CP (first patrol): max 10 scrolls
+      const MAX_SCROLLS_NO_CP = 10;
+      const maxScrolls = lastCheckpoint ? Infinity : MAX_SCROLLS_NO_CP;
+
+      // Track screenshots to detect duplicates (for detecting "stuck" state / reached top)
+      const recentScreenshots: string[] = [];
+
+      // Track if we're at the top (no more scrolling possible)
+      let consecutiveNoChangeScreenshots = 0;
+      const NO_CHANGE_THRESHOLD = 3; // Stop after 3 identical screenshots
+
+      for (let scrollCount = 0; scrollCount < maxScrolls; scrollCount++) {
+        // Check window before each scroll operation
+        const winInLoop = windowFinder.findWeChatWindow();
+        if (!winInLoop) {
+          logger.warn(`WeChat window disappeared during patrol of ${target.name}`);
+          break;
+        }
+
         screenshotIndex++;
         const suffix = String(screenshotIndex);
-        const filepath = await captureCurrentChat(target.name, suffix);
+
+        // Use the newest checkpoint found so far for naming (will be updated after OCR)
+        const filepath = await captureCurrentChat(target.name, suffix, newestCheckpoint || undefined);
 
         if (!filepath) {
           logger.warn(`Failed to capture screenshot ${screenshotIndex}`);
@@ -276,6 +441,33 @@ async function patrolTarget(target: { name: string; category: string }): Promise
         const pngBuffer = fs.readFileSync(filepath);
         const timestampResults = await recognizeTimestamps(pngBuffer, 0, 0);
 
+        // Create fingerprint from full image content hash (for detecting stuck state)
+        const imageHash = crypto.createHash('md5').update(pngBuffer).digest('hex');
+        recentScreenshots.push(imageHash);
+
+        // Keep only last 3 screenshots for comparison
+        if (recentScreenshots.length > 3) {
+          recentScreenshots.shift();
+        }
+
+        // Check for stuck state (screenshot content not changing after scroll)
+        // This indicates we've reached the top and can't scroll further
+        if (recentScreenshots.length >= 2) {
+          const last = recentScreenshots[recentScreenshots.length - 1];
+          const prev = recentScreenshots[recentScreenshots.length - 2];
+          if (last === prev) {
+            consecutiveNoChangeScreenshots++;
+            logger.debug(`Screenshot unchanged (${consecutiveNoChangeScreenshots}/${NO_CHANGE_THRESHOLD}), may be at top`);
+            if (consecutiveNoChangeScreenshots >= NO_CHANGE_THRESHOLD) {
+              logger.info('Reached top of chat (screenshot unchanged), stopping...');
+              break;
+            }
+          } else {
+            consecutiveNoChangeScreenshots = 0;
+          }
+        }
+
+        // Handle timestamp detection for checkpoint
         if (timestampResults.length > 0) {
           logger.debug(`OCR results: ${timestampResults.map(r => `"${r.text}" at y=${r.y}`).join(', ')}`);
 
@@ -285,43 +477,56 @@ async function patrolTarget(target: { name: string; category: string }): Promise
             const dateStr = year ? `${year}/${month}/${day}` : (month ? `${month}/${day}` : 'today');
             logger.info(`Found timestamps: ${timestampResults.map(r => r.text).join(', ')} (newest: ${dateStr} ${newest.checkpoint.hour}:${String(newest.checkpoint.minute).padStart(2, '0')})`);
 
-            // Check if we've reached the old checkpoint
-            if (lastCheckpoint && newest.checkpoint.timeStr === lastCheckpoint.timeStr) {
-              logger.info(`Reached previous checkpoint "${lastCheckpoint.timeStr}", stopping...`);
-              newestCheckpoint = lastCheckpoint;
-              break;
+            // Track the newest timestamp
+            if (!newestCheckpoint) {
+              logger.debug(`[debug] Setting initial checkpoint: ${newest.checkpoint.timeStr}`);
+              newestCheckpoint = newest.checkpoint;
+            } else {
+              const newer = isNewer(newest.checkpoint, newestCheckpoint);
+              logger.debug(`[debug] isNewer(${newest.checkpoint.timeStr}, ${newestCheckpoint.timeStr}) = ${newer}`);
+              if (newer) {
+                newestCheckpoint = newest.checkpoint;
+              }
             }
 
-            // Track the newest timestamp
-            if (!newestCheckpoint || isNewer(newest.checkpoint, newestCheckpoint)) {
-              newestCheckpoint = newest.checkpoint;
+            // Check if we've reached the old checkpoint
+            if (lastCheckpoint) {
+              const reachedCheckpoint = timestampResults.some(r => {
+                if (!r.parsed) return false;
+                const cp: Checkpoint = {
+                  timestamp: 0,
+                  timeStr: r.text,
+                  month: r.parsed.month,
+                  day: r.parsed.day,
+                  year: r.parsed.year,
+                  hour: r.parsed.hour,
+                  minute: r.parsed.minute,
+                };
+                return !isNewer(cp, lastCheckpoint);
+              });
+              if (reachedCheckpoint) {
+                if (scrollCount === 0) {
+                  logger.info(`No new messages since checkpoint "${lastCheckpoint.timeStr}", done.`);
+                  newestCheckpoint = lastCheckpoint;
+                } else {
+                  logger.info(`Reached checkpoint "${lastCheckpoint.timeStr}" after ${scrollCount} scrolls, done.`);
+                }
+                break;
+              }
             }
           }
         } else {
           logger.debug('No timestamps found in screenshot');
         }
 
-        // Check if we should continue scrolling
-        if (lastCheckpoint) {
-          // If we found the old checkpoint, we're done
-          const foundOld = timestampResults.some(r => r.text === lastCheckpoint.timeStr);
-          if (foundOld) {
-            logger.info(`Found old checkpoint "${lastCheckpoint.timeStr}", stopping...`);
-            break;
-          }
-        }
-
-        // Stop if no timestamps found (probably at top of chat)
-        if (timestampResults.length === 0 && scrollCount > 2) {
-          logger.info('No timestamps found, reached top of chat');
+        // Scroll up for next screenshot
+        const winBeforeScrollUp = windowFinder.findWeChatWindow();
+        if (!winBeforeScrollUp) {
+          logger.warn(`WeChat window disappeared before scrollUp for ${target.name}`);
           break;
         }
-
-        // Scroll up for next screenshot
-        if (scrollCount < MAX_SCROLLS - 1) {
-          await scrollUp();
-          await new Promise(r => setTimeout(r, 300));
-        }
+        await scrollUp();
+        await new Promise(r => setTimeout(r, 300));
       }
 
       // Save checkpoint
@@ -338,6 +543,12 @@ async function patrolTarget(target: { name: string; category: string }): Promise
       // Send greeting on first visit only if greeting is enabled
       const targetKey = `${target.name}|${target.category}`;
       if (config.bot.greetingEnabled && !greetedTargets.has(targetKey)) {
+        // Check window before sending message
+        const winBeforeGreeting = windowFinder.findWeChatWindow();
+        if (!winBeforeGreeting) {
+          logger.warn(`WeChat window disappeared before greeting ${target.name}`);
+          return true; // Still return true as patrol completed
+        }
         await sendMessage(config.bot.greetingMessage);
         greetedTargets.add(targetKey);
         logger.info(`Greeting sent to ${target.name}`);
@@ -364,16 +575,27 @@ export async function runPatrol(): Promise<void> {
   logger.info('       Patrol Round...                ');
   logger.info('======================================');
 
-  // Activate WeChat first
-  await activateWeChat();
+  // Try to activate WeChat first (can restore minimized windows)
+  const activateResult = await activateWeChat();
   await new Promise(r => setTimeout(r, 300));
+
+  // Then find the window (after activation, it should be visible)
+  const windowFinder = getCapturer().getWindowFinder();
+  const win = windowFinder.findWeChatWindow();
+
+  if (!win) {
+    logger.warn('WeChat window not found, skipping patrol round...');
+    return;
+  }
+
+  logger.info(`Found WeChat window: ${win.width}x${win.height} at (${win.x}, ${win.y})`);
 
   let successCount = 0;
   let failCount = 0;
 
   for (let i = 0; i < config.bot.targets.length; i++) {
     const target = config.bot.targets[i];
-    const ok = await patrolTarget(target);
+    const ok = await patrolTarget(target, win);
 
     if (ok) {
       successCount++;

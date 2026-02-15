@@ -82,6 +82,7 @@ export async function activateWeChat(): Promise<AhkResult> {
 }
 
 export async function typeSearch(text: string): Promise<AhkResult> {
+  logger.info(`[ahkBridge] typeSearch called with: ${text}`);
   return executeAhk(['type_search', text]);
 }
 

@@ -94,10 +94,10 @@ else if (action = "scroll_home") {
     OutputJSON(true, "scroll_home", "Scrolled to top")
 }
 else if (action = "scroll_up") {
-    ; Scroll up by one screen height
-    Send "{WheelUp}"
+    ; Scroll up by one screen height using PageUp
+    Send "{PgUp}"
     Sleep 200
-    OutputJSON(true, "scroll_up", "Scrolled up one screen")
+    OutputJSON(true, "scroll_up", "Scrolled up one screen (PgUp)")
 }
 else if (action = "scroll_down") {
     ; Scroll down by one screen height
@@ -120,7 +120,9 @@ OutputJSON(success, action, msg) {
     msg := StrReplace(msg, "`"", "\`"")
     msg := StrReplace(msg, "`n", "\n")
     msg := StrReplace(msg, "`r", "\r")
-    FileAppend '{"success": ' . s . ', "action": "' . action . '", "message": "' . msg . '"}' . "`n", "*"
+    ; Include PID for debugging duplicate calls
+    pid := DllCall("GetCurrentProcessId")
+    FileAppend '{"success": ' . s . ', "action": "' . action . '", "message": "' . msg . '", "pid": ' . pid . '}' . "`n", "*"
 }
 
 ActivateWeChat() {
@@ -139,15 +141,31 @@ ActivateWeChat() {
 TypeSearch(text) {
     if (!ActivateWeChat())
         return false
+
+    ; Save current clipboard first
+    clipSaved := ClipboardAll()
+    Sleep 100
+
     Send "^f"
-    Sleep 400
+    Sleep 500
+
+    ; Clear search box first
     Send "^a"
     Sleep 100
-    clipSaved := ClipboardAll()
-    A_Clipboard := text
+    Send "{Delete}"
     Sleep 100
+
+    ; Set and paste new text
+    A_Clipboard := text
+    Sleep 300
     Send "^v"
-    Sleep 800
+    Sleep 1000
+
+    ; Clear clipboard to prevent accidental paste
+    A_Clipboard := ""
+    Sleep 100
+
+    ; Restore original clipboard
     A_Clipboard := clipSaved
     clipSaved := ""
     return true

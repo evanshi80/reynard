@@ -150,9 +150,36 @@ export async function findCategoryPosition(
 }
 
 /**
+ * Fuzzy match for weekday recognition
+ * Aggressive matching: any occurrence of weekday character is treated as weekday
+ * Handles OCR errors like "是期三" -> "周三", "旺期二" -> "周二"
+ */
+function parseWeekday(text: string): number | null {
+  const clean = text.replace(/\s+/g, '');
+
+  // Character map: only actual weekday characters
+  // OCR may produce: 周三, 星期三, 是期三, 旺期二,汪期二, etc.
+  // All contain: 一二三四五六日天
+  const charMap: { [key: string]: number } = {
+    '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7,
+  };
+
+  // Aggressive: find ANY weekday character in the text
+  for (const char of Object.keys(charMap)) {
+    if (clean.includes(char)) {
+      return charMap[char];
+    }
+  }
+
+  return null;
+}
+
+/**
  * Parse timestamp from OCR text
  * Formats:
  * - 当日: HH:mm (e.g., "09:30", "21:45")
+ * - 昨天/昨日: 昨天HH:mm / 昨日HH:mm
+ * - 星期X: 周一/周二/周三/周四/周五/周六/周日 + HH:mm
  * - 历史: M/d HH:mm (e.g., "1/15 09:30", "12/25 21:30")
  * - 历史中文: M月d日 HH:mm (e.g., "1月15日 09:30", "12月25日 21:30")
  * - 完整日期: YYYY/M/d HH:mm (e.g., "2025/1/15 09:30")
@@ -168,30 +195,85 @@ export function parseTimestamp(text: string): { hour: number; minute: number; mo
   const hour = parseInt(timeMatch[1], 10);
   const minute = parseInt(timeMatch[2], 10);
 
+  // Validate hour range
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+
   // Extract date if present
-  // Try formats in order of specificity
   let month: number | undefined;
   let day: number | undefined;
   let year: number | undefined;
 
-  // YYYY/M/d or YYYY-M-d (full date)
-  const fullDateMatch = clean.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
-  if (fullDateMatch) {
-    year = parseInt(fullDateMatch[1], 10);
-    month = parseInt(fullDateMatch[2], 10);
-    day = parseInt(fullDateMatch[3], 10);
-  } else {
-    // M/d or M月d日 (month/day)
+  // Helper to set date to yesterday
+  const setYesterday = () => {
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    year = yesterday.getFullYear();
+    month = yesterday.getMonth() + 1;
+    day = yesterday.getDate();
+  };
+
+  // Helper to set date to specific weekday (last occurrence, not today)
+  const setWeekday = (weekdayNum: number) => {
+    const now = new Date();
+    // Convert: JS Sunday=0 → Chinese Sunday=7 (end of week), Monday=1 stays Monday
+    const currentDay = now.getDay() === 0 ? 7 : now.getDay();
+    const targetWeekday = weekdayNum === 0 ? 7 : weekdayNum;
+
+    // Calculate days ago for this weekday
+    let diff = currentDay - targetWeekday;
+    if (diff <= 0) diff += 7; // If target is today or ahead, go back a week
+
+    const targetDate = new Date(now);
+    targetDate.setDate(now.getDate() - diff);
+
+    year = targetDate.getFullYear();
+    month = targetDate.getMonth() + 1;
+    day = targetDate.getDate();
+  };
+
+  // 昨天 / 昨日 (yesterday)
+  if (clean.includes('昨天') || clean.includes('昨日')) {
+    setYesterday();
+  }
+
+  // 星期X (周一到周日) - with fuzzy matching for OCR errors
+  const weekday = parseWeekday(clean);
+  if (weekday !== null) {
+    setWeekday(weekday);
+  }
+
+  // 星期1, 星期2, 星期N (numeric weekday)
+  const weekdayNumMatch = clean.match(/星期([1-7])/);
+  if (weekdayNumMatch) {
+    setWeekday(parseInt(weekdayNumMatch[1], 10));
+  }
+
+  // 周1, 周2 (short numeric weekday)
+  const weekNumMatch = clean.match(/^周([1-7])(\d{1,2}:\d{2})/);
+  if (weekNumMatch) {
+    setWeekday(parseInt(weekNumMatch[1], 10));
+  }
+
+  // YYYY/M/d or YYYY-M-d (full date) - only if not already set
+  if (year === undefined) {
+    const fullDateMatch = clean.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (fullDateMatch) {
+      year = parseInt(fullDateMatch[1], 10);
+      month = parseInt(fullDateMatch[2], 10);
+      day = parseInt(fullDateMatch[3], 10);
+    }
+  }
+
+  // M/d or M月d日 (month/day) - only if not already set
+  if (year === undefined && month === undefined) {
     const dateMatch = clean.match(/(\d{1,2})[\/\月](\d{1,2})[\日]?/);
     if (dateMatch) {
       month = parseInt(dateMatch[1], 10);
       day = parseInt(dateMatch[2], 10);
     }
-  }
-
-  // Validate hour range
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-    return null;
   }
 
   return { hour, minute, ...(month !== undefined && { month }), ...(day !== undefined && { day }), ...(year !== undefined && { year }) };
