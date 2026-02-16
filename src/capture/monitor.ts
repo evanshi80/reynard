@@ -1,6 +1,7 @@
 import { config } from '../config';
 import { RecognizedMessage } from '../types';
 import { createVisionProvider } from '../vision/providers';
+import { createCheckpointFromTimeStr } from '../bot/patrol';
 import { saveMessage } from '../database/repositories/messageRepository';
 import { webhookQueue } from '../webhook/queue';
 import logger from '../utils/logger';
@@ -115,26 +116,14 @@ export class MessageMonitor {
       // Try to parse time from LLM response, otherwise use current time
       let timestamp = Date.now();
       if (msg.time) {
-        // Format examples: "09:30" (today), "1/15 09:30" (past date), "1月15日 09:30" (Chinese format)
-        const now = new Date();
-        const capturedTime = this.status.lastCapture ? new Date(this.status.lastCapture) : now;
-
-        // Try parsing date+time format (M/d HH:mm or M月d日 HH:mm)
-        const dateTimeMatch = msg.time.match(/(\d{1,2})[\/\月](\d{1,2})[\日]?\s*(\d{1,2}):(\d{2})/);
-        if (dateTimeMatch) {
-          const month = parseInt(dateTimeMatch[1], 10);
-          const day = parseInt(dateTimeMatch[2], 10);
-          const hours = parseInt(dateTimeMatch[3], 10);
-          const minutes = parseInt(dateTimeMatch[4], 10);
-          timestamp = new Date(now.getFullYear(), month - 1, day, hours, minutes, 0, 0).getTime();
+        // Use centralized timestamp parsing (handles all formats with local timezone)
+        const checkpoint = createCheckpointFromTimeStr(msg.time, Date.now());
+        if (checkpoint.year && checkpoint.month && checkpoint.day) {
+          timestamp = new Date(checkpoint.year, checkpoint.month - 1, checkpoint.day, checkpoint.hour, checkpoint.minute, 0, 0).getTime();
         } else {
-          // Try simple time format (HH:mm)
-          const timeMatch = msg.time.match(/(\d{1,2}):(\d{2})/);
-          if (timeMatch) {
-            const hours = parseInt(timeMatch[1], 10);
-            const minutes = parseInt(timeMatch[2], 10);
-            timestamp = new Date(capturedTime.setHours(hours, minutes, 0, 0)).getTime();
-          }
+          // Simple HH:mm format, use captured time as base
+          const capturedTime = this.status.lastCapture ? new Date(this.status.lastCapture) : new Date();
+          timestamp = new Date(capturedTime.setHours(checkpoint.hour, checkpoint.minute, 0, 0)).getTime();
         }
       }
 

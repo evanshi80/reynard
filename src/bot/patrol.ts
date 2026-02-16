@@ -65,26 +65,20 @@ export function saveCheckpoint(targetName: string, checkpoint: Checkpoint): void
 /**
  * Fuzzy match weekday OCR errors
  * Handles "是期三" -> 周三, etc.
+ * Aggressive matching: any occurrence of weekday character is treated as weekday
  */
 function parseWeekdayForCheckpoint(text: string): number | null {
   const clean = text.replace(/\s+/g, '');
 
+  // Character map: only actual weekday characters
   const charMap: { [key: string]: number } = {
     '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7,
-    'Z': 3, 'z': 3, '2': 2, '_': 3, '-': 3, '?': 0, 'S': 3, 's': 3,
   };
 
-  const patterns = [
-    /周([一二三四五六日Zz2_\-S])/,
-    /星期([一二三四五六日Zz2_\-S])/,
-    /是期([一二三四五六日Zz2_\-S])/,  // OCR error
-  ];
-
-  for (const pattern of patterns) {
-    const match = clean.match(pattern);
-    if (match) {
-      const char = match[1];
-      return charMap[char] || null;
+  // Aggressive: find ANY weekday character in the text
+  for (const char of Object.keys(charMap)) {
+    if (clean.includes(char)) {
+      return charMap[char];
     }
   }
 
@@ -128,8 +122,13 @@ export function createCheckpointFromTimeStr(timeStr: string, timestamp: number):
   else if (clean.includes('周') || clean.includes('是期')) {
     const weekday = parseWeekdayForCheckpoint(clean);
     if (weekday !== null) {
-      const targetWeekday = weekday === 0 ? 0 : weekday;
-      const diff = (targetWeekday - currentDay + 7) % 7 || 7; // days ago
+      // Convert: JS Sunday=0 → Chinese Sunday=7 (end of week), Monday=1 stays Monday
+      const currentDayChinese = currentDay === 0 ? 7 : currentDay;
+      const targetWeekday = weekday === 0 ? 7 : weekday;
+
+      let diff = currentDayChinese - targetWeekday;
+      if (diff <= 0) diff += 7; // If target is today or ahead, go back a week
+
       const targetDate = new Date(now);
       targetDate.setDate(now.getDate() - diff);
       year = targetDate.getFullYear();

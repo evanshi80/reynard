@@ -54,24 +54,34 @@ export function createVisionProvider(): VisionProvider {
  * Build extraction prompt, optionally enriched with target context.
  */
 function buildPrompt(context?: RecognizeContext): string {
+  const now = new Date();
+  const today = `${now.getMonth() + 1}/${now.getDate()}`;
+  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const weekday = weekdays[now.getDay()];
+
   let header = '分析这张微信聊天截图，提取所有消息内容。\n';
 
   if (context) {
     const isGroup = context.category === '群聊';
     header += `\n已知信息：这是一个${isGroup ? '群聊' : '私聊（好友对话）'}，名称为"${context.targetName}"。\n`;
     if (!isGroup) {
-      header += `私聊规则：左侧消息的发送者是"${context.targetName}"，右侧消息的发送者是"我"。\n`;
+      header += `私聊规则：左侧消息的发送者是"${context.targetName}"（对方），右侧消息的发送者是"我"（自己）。\n`;
+      header += `重要：右侧消息的sender字段必须填"我"，不要填昵称或其他内容。\n`;
     }
   }
 
   return `${header}
 重要规则：
-1. 时间戳是聚合显示的：如果多条第1条消息上方显示 "19:08"，那么这5条消息的时间都是 19:08
-2. 当天消息格式：HH:mm（如 09:30）
-3. 非当天消息格式：月/日 HH:mm（如 1/15 09:30）或中文格式
+1. 今天日期是 ${today}，星期是 ${weekday}
+2. 时间戳是聚合显示的：如果多条第1条消息上方显示 "19:08"，那么这5条消息的时间都是 19:08
+3. 根据时间戳格式推理完整日期：
+   - 只有 HH:mm（如 09:30）→ 今天的消息，日期 = ${today}
+   - 月/日 HH:mm（如 1/15 09:30）→ 需要根据 ${weekday} 推理
+   - 星期X HH:mm（如 周三 21:30）→ 根据今天 ${weekday} 推理是上周的星期X
+   - 昨天 HH:mm → ${now.getMonth() + 1}/${now.getDate() - 1}
 4. 区分群聊和私聊：
    - 群聊：每条消息上方有发送者昵称，准确识别昵称
-   - 私聊：消息分左右两侧，左侧=对方，右侧="我"
+   - 私聊：消息分左右两侧，左侧=对方（sender="${context?.targetName || '对方'}"), 右侧="我"（sender="我"）
 
 请以 JSON 格式返回：
 {
@@ -80,13 +90,15 @@ function buildPrompt(context?: RecognizeContext): string {
     {
       "sender": "发送者昵称",
       "content": "消息内容",
-      "time": "HH:mm"
+      "time": "2/11 21:43"
     }
   ]
 }
 
 注意：
 - 准确识别聚合时间戳，每条消息都必须有时间
+- sender必须是准确的发送者昵称，群聊不要漏掉发送者
+- 私聊右侧消息sender必须是"我"，不要填其他内容
 - 只返回 JSON，不要包裹在 code block 里。`;
 }
 
