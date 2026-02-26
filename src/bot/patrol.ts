@@ -372,7 +372,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
         dpi
       );
 
-      const downCount = result ? result.downCount : 2; // fallback to 2
+      const downCount = result ? result.downCount : 1; // fallback to 1 (Home lands on 搜一搜, need 1 Down to reach 群聊)
       logger.info(`Category found at relY=${result?.categoryY}, using ${downCount} Down presses`);
 
       // Navigate to result
@@ -405,10 +405,11 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
       let screenshotIndex = 0;
       let newestCheckpoint: Checkpoint | null = null;
 
-      // Has CP: scroll until we reach it (no hard limit, rely on checkpoint + stuck detection)
+      // Has CP: scroll until we reach it, but with hard limit to avoid infinite scroll
       // No CP (first patrol): max 10 scrolls
       const MAX_SCROLLS_NO_CP = 10;
-      const maxScrolls = lastCheckpoint ? Infinity : MAX_SCROLLS_NO_CP;
+      const HARD_MAX_SCROLLS = 50; // Hard limit even with old checkpoint
+      const maxScrolls = lastCheckpoint ? HARD_MAX_SCROLLS : MAX_SCROLLS_NO_CP;
 
       // Track screenshots to detect duplicates (for detecting "stuck" state / reached top)
       const recentScreenshots: string[] = [];
@@ -515,7 +516,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
             }
           }
         } else {
-          logger.debug('No timestamps found in screenshot');
+          logger.debug(`No timestamps found in screenshot ${screenshotIndex} (scroll ${scrollCount})`);
         }
 
         // Scroll up for next screenshot
@@ -534,6 +535,20 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
       } else if (lastCheckpoint) {
         // Keep old checkpoint if no new one found
         logger.info(`Keeping old checkpoint "${lastCheckpoint.timeStr}"`);
+      } else {
+        // No checkpoint at all - use current time as fallback
+        const now = new Date();
+        const fallbackCP: Checkpoint = {
+          timestamp: Date.now(),
+          timeStr: `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+          year: now.getFullYear(),
+          month: now.getMonth() + 1,
+          day: now.getDate(),
+          hour: now.getHours(),
+          minute: now.getMinutes(),
+        };
+        saveCheckpoint(target.name, fallbackCP);
+        logger.info(`No timestamps found after ${screenshotIndex} screenshots, using current time as fallback: ${fallbackCP.timeStr}`);
       }
 
       // Record patrol timestamp
@@ -563,11 +578,32 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
 
 /**
  * Run a single patrol round
+ * Returns true if at least one target was processed successfully
  */
-export async function runPatrol(): Promise<void> {
+export async function runPatrol(): Promise<boolean> {
   if (!config.bot.targets || config.bot.targets.length === 0) {
     logger.info('No patrol targets configured');
-    return;
+    return false;
+  }
+
+  // Check if text mode is enabled - use chat history extraction instead of screenshot patrol
+  if (config.vision.extractMode === 'text') {
+    logger.info('======================================');
+    logger.info('  Patrol Round (Text Mode)...        ');
+    logger.info('======================================');
+
+    const { extractMessagesTextMode } = require('../capture/monitor');
+    for (const target of config.bot.targets) {
+      try {
+        await extractMessagesTextMode(target.name, target.category);
+      } catch (error) {
+        logger.error(`Text mode patrol: error processing ${target.name}:`, error);
+      }
+    }
+    logger.info('======================================');
+    logger.info('  Patrol complete (text mode)        ');
+    logger.info('======================================');
+    return true; // Text mode is considered successful if it runs
   }
 
   logger.info('======================================');
@@ -584,7 +620,7 @@ export async function runPatrol(): Promise<void> {
 
   if (!win) {
     logger.warn('WeChat window not found, skipping patrol round...');
-    return;
+    return false;
   }
 
   logger.info(`Found WeChat window: ${win.width}x${win.height} at (${win.x}, ${win.y})`);
@@ -611,6 +647,8 @@ export async function runPatrol(): Promise<void> {
   logger.info('======================================');
   logger.info(`Patrol complete: ${successCount} success, ${failCount} failed`);
   logger.info('======================================');
+
+  return successCount > 0;
 }
 
 // Patrol state
@@ -632,9 +670,9 @@ export async function startPatrol(): Promise<void> {
   const maxRounds = config.patrol.maxRounds;
   logger.info(`Starting patrol with interval: ${config.patrol.interval}ms (maxRounds: ${maxRounds || 'unlimited'}, greeting: ${config.bot.greetingEnabled ? 'enabled' : 'disabled'})`);
 
-  // Run immediately
-  await runPatrol();
-  patrolRoundCount++;
+  // Run immediately - only count successful patrols towards max rounds
+  const initialSuccess = await runPatrol();
+  if (initialSuccess) patrolRoundCount++;
 
   // Schedule next runs using setTimeout to prevent overlap
   const scheduleNext = () => {
@@ -646,8 +684,8 @@ export async function startPatrol(): Promise<void> {
     }
     patrolTimer = setTimeout(async () => {
       if (!patrolRunning) return;
-      await runPatrol();
-      patrolRoundCount++;
+      const success = await runPatrol();
+      if (success) patrolRoundCount++;
       scheduleNext();
     }, config.patrol.interval);
   };

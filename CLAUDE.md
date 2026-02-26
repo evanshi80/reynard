@@ -31,6 +31,20 @@ npm run build        # TypeScript 编译
 npm start            # 运行编译产物
 ```
 
+## 开发调试
+
+### 停止开发服务器
+由于 Claude Code 的 TaskStop 有时无法彻底停止后台进程，请使用以下方法：
+
+```bash
+# 方法1: 使用 taskkill 强制停止所有 node 进程
+taskkill //F //IM node.exe
+
+# 方法2: 先查找进程再杀死
+tasklist | grep node   # 查找 node 进程
+taskkill //F //PID <PID>  # 杀死指定进程
+```
+
 ## Project Structure
 
 ```
@@ -105,7 +119,9 @@ scripts/
 
 14. **OCR 结果必须去空格**: Tesseract 中文输出每字间有空格, 所有结果必须 `.replace(/\s+/g, '')` 后再匹配
 15. **中文识别需模糊匹配**: "群聊"常被误识别为"群获/群了/群人", 用 `isFuzzyMatch` 兜底
-16. **OCR 预处理**: 放大 2x + 灰度 + 增强对比度, 参数通过 `OCR_*` 环境变量可配
+16. **OCR 预处理**: 默认 放大 3x + 灰度 + 对比度1.5 + 亮度-20, 参数通过 `OCR_*` 环境变量可配
+17. **星期时间戳解析**: 当OCR识别到"星期X"或"周X"时，会解析为**上一周的星期X**（非当天）。例如今天周三，识别到"星期三"会解析为上周三。可通过 `OCR_WEEKDAY_AS_TODAY` 环境变量配置（设为true则视为当天）
+18. **recognizeTimestamps 预处理**: 该函数现在会对截图进行预处理（缩放、灰度、增强对比度）后再OCR识别，提高时间戳识别率
 
 ### robotjs 像素格式
 
