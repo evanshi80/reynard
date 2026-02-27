@@ -6,16 +6,14 @@ export interface Config {
     apiKey?: string;
     temperature: number;
     maxTokens: number;
+    // 消息提取模式: 'vlm' = VLM截图识别, 'text' = 聊天记录文本+OCR
+    extractMode: 'vlm' | 'text';
   };
   capture: {
     enabled: boolean;
-    interval: number;
     windowName: string;
     saveScreenshots: boolean;
     screenshotDir: string;
-    incrementalDetection: boolean;
-    // 窗口控制选项
-    activateWindow: boolean;  // 截图前激活窗口
   };
   web: {
     port: number;
@@ -101,10 +99,12 @@ export interface WebhookPayload {
 export interface RecognizedMessage {
   roomName: string;
   messages: Array<{
+    index: number;      // 消息在截图中的顺序
     sender: string;
     content: string;
-    time: string | null;
+    time: string;      // 必须填写，继承自该时间组的聚合时间
   }>;
+  referenceTime?: string; // 用于顶部无时间戳时的fallback时间
 }
 
 export interface MonitorStatus {

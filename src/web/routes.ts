@@ -101,7 +101,7 @@ export function createRoutes(): Router {
         },
         capture: {
           enabled: config.capture.enabled,
-          interval: config.capture.interval,
+          interval: config.patrol.interval,
           windowName: config.capture.windowName,
         },
         messages: recentMessages.map(m => ({

@@ -114,6 +114,45 @@ export async function scrollUp(): Promise<AhkResult> {
   return executeAhk(['scroll_up']);
 }
 
+// ============================================================
+// Chat History Extraction Functions
+// ============================================================
+
+/**
+ * Click the three dots menu button at top right of chat window
+ */
+export async function clickThreeDots(winX: number, winY: number, winW: number, winH: number): Promise<AhkResult> {
+  return executeAhk(['click_three_dots', String(winX), String(winY), String(winW), String(winH)]);
+}
+
+/**
+ * Select a menu item by text (e.g., "查找聊天内容")
+ */
+export async function selectMenuItem(item: string): Promise<AhkResult> {
+  return executeAhk(['select_menu_item', item]);
+}
+
+/**
+ * Copy message content: click on message area + Ctrl+A + Ctrl+C
+ */
+export async function copyMessage(winX: number, winY: number, winW: number, winH: number): Promise<AhkResult> {
+  return executeAhk(['copy_message', String(winX), String(winY), String(winW), String(winH)]);
+}
+
+/**
+ * Read clipboard content
+ */
+export async function readClipboard(): Promise<AhkResult> {
+  return executeAhk(['read_clipboard']);
+}
+
+/**
+ * Scroll up in chat history
+ */
+export async function scrollHistory(): Promise<AhkResult> {
+  return executeAhk(['scroll_history']);
+}
+
 // Async mutex for serializing AHK operations
 let lockChain: Promise<void> = Promise.resolve();
 

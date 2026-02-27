@@ -36,21 +36,22 @@ export async function isDuplicateImage(a: Buffer, b: Buffer): Promise<boolean> {
  * @returns number of overlap pixels (0 if no overlap found)
  */
 export async function detectOverlap(older: Buffer, newer: Buffer): Promise<number> {
-  const [olderMeta, newerMeta] = await Promise.all([
-    sharp(older).metadata(),
-    sharp(newer).metadata(),
-  ]);
+  try {
+    const [olderMeta, newerMeta] = await Promise.all([
+      sharp(older).metadata(),
+      sharp(newer).metadata(),
+    ]);
 
-  const olderH = olderMeta.height!;
-  const newerH = newerMeta.height!;
-  const width = olderMeta.width!;
+    const olderH = olderMeta.height!;
+    const newerH = newerMeta.height!;
+    const width = olderMeta.width!;
 
-  // Downscale width for faster comparison
-  const thumbWidth = Math.max(Math.round(width / 4), 50);
-  const stripHeight = 20;
-  const maxSearch = Math.min(Math.round(Math.min(olderH, newerH) * 0.8), 600);
+    // Downscale width for faster comparison
+    const thumbWidth = Math.max(Math.round(width / 4), 50);
+    const stripHeight = 20;
+    const maxSearch = Math.min(Math.round(Math.min(olderH, newerH) * 0.8), Math.min(olderH, newerH) - stripHeight);
 
-  if (maxSearch < stripHeight) return 0;
+    if (maxSearch < stripHeight) return 0;
 
   // Get bottom portion of older image and top portion of newer image
   const [olderBottom, newerTop] = await Promise.all([
@@ -61,7 +62,7 @@ export async function detectOverlap(older: Buffer, newer: Buffer): Promise<numbe
       .raw()
       .toBuffer(),
     sharp(newer)
-      .extract({ left: 0, top: 0, width, height: maxSearch })
+      .extract({ left: 0, top: 0, width, height: Math.min(newerH, maxSearch) })
       .resize(thumbWidth, maxSearch, { fit: 'fill' })
       .grayscale()
       .raw()
@@ -91,6 +92,10 @@ export async function detectOverlap(older: Buffer, newer: Buffer): Promise<numbe
   }
 
   return 0;
+  } catch (err) {
+    logger.warn(`detectOverlap failed: ${err}`);
+    return 0;
+  }
 }
 
 /**
@@ -168,39 +173,6 @@ export async function stitchImages(images: Buffer[]): Promise<Buffer> {
   }
 
   return result;
-}
-
-/**
- * Compare a new screenshot against a baseline and extract only the new (non-overlapping) portion.
- * Returns null if the images are duplicates (no new content).
- */
-export async function extractNewContent(baseline: Buffer, newer: Buffer): Promise<Buffer | null> {
-  // If they're nearly identical, no new content
-  if (await isDuplicateImage(baseline, newer)) {
-    return null;
-  }
-
-  const overlap = await detectOverlap(baseline, newer);
-  const newerMeta = await sharp(newer).metadata();
-  const newerH = newerMeta.height!;
-  const newerW = newerMeta.width!;
-
-  if (overlap <= 0) {
-    // No overlap found — entirely new content (or chat changed completely)
-    return newer;
-  }
-
-  const newHeight = newerH - overlap;
-  if (newHeight <= 20) {
-    // Only a sliver of new content, likely noise
-    return null;
-  }
-
-  logger.debug(`Extracting new content: ${newHeight}px below ${overlap}px overlap`);
-  return sharp(newer)
-    .extract({ left: 0, top: overlap, width: newerW, height: newHeight })
-    .png()
-    .toBuffer();
 }
 
 /**

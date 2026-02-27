@@ -1,6 +1,5 @@
 import { config } from '../config';
 import logger from '../utils/logger';
-import path from 'path';
 import fs from 'fs';
 import sharp from 'sharp';
 import { WindowFinder } from './windowFinder';
@@ -12,32 +11,19 @@ interface WindowBounds {
   height: number;
 }
 
-interface ChatAreaBounds {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 /**
- * Screenshot capturer with auto-detected chat area and incremental change detection
+ * Screenshot capturer with auto-detected chat area
  */
 export class ScreenshotCapturer {
   private saveDir: string;
-  private shouldSave: boolean;
-  private incrementalDetection: boolean;
-  private lastWindowBounds: WindowBounds | null = null;
-  private lastFullScreenshot: Buffer | null = null;
-  private chatAreaBounds: ChatAreaBounds | null = null;
   private windowFinder: WindowFinder;
 
   constructor() {
     this.saveDir = config.capture.screenshotDir;
-    this.shouldSave = config.capture.saveScreenshots;
-    this.incrementalDetection = config.capture.incrementalDetection;
     this.windowFinder = new WindowFinder();
 
-    if (this.shouldSave && !fs.existsSync(this.saveDir)) {
+    const shouldSave = config.capture.saveScreenshots;
+    if (shouldSave && !fs.existsSync(this.saveDir)) {
       fs.mkdirSync(this.saveDir, { recursive: true });
     }
   }
@@ -159,68 +145,6 @@ export class ScreenshotCapturer {
   }
 
   /**
-   * Calculate difference between two images and return bounding box of changes
-   */
-  private findChanges(oldBuffer: Buffer, newBuffer: Buffer, width: number, height: number): {
-    hasChanges: boolean;
-    boundingBox: { x: number; y: number; width: number; height: number } | null;
-    changedRegionBuffer: Buffer | null;
-  } {
-    let minX = width;
-    let maxX = 0;
-    let minY = height;
-    let maxY = 0;
-    let changeCount = 0;
-
-    const threshold = 30; // Color difference threshold
-    const sampleStep = 2; // Sample every 2nd pixel for performance
-
-    // Find bounding box of changes
-    for (let y = 0; y < height; y += sampleStep) {
-      for (let x = 0; x < width; x += sampleStep) {
-        const idx = (y * width + x) * 3;
-        const oldR = oldBuffer[idx];
-        const oldG = oldBuffer[idx + 1];
-        const oldB = oldBuffer[idx + 2];
-        const newR = newBuffer[idx];
-        const newG = newBuffer[idx + 1];
-        const newB = newBuffer[idx + 2];
-
-        const diff = Math.abs(oldR - newR) + Math.abs(oldG - newG) + Math.abs(oldB - newB);
-
-        if (diff > threshold * 3) {
-          changeCount++;
-          minX = Math.min(minX, x);
-          maxX = Math.max(maxX, x);
-          minY = Math.min(minY, y);
-          maxY = Math.max(maxY, y);
-        }
-      }
-    }
-
-    // No significant changes
-    if (changeCount < 50) {
-      return { hasChanges: false, boundingBox: null, changedRegionBuffer: null };
-    }
-
-    // Add padding to bounding box
-    const padding = 10;
-    minX = Math.max(0, minX - padding);
-    minY = Math.max(0, minY - padding);
-    maxX = Math.min(width - 1, maxX + padding);
-    maxY = Math.min(height - 1, maxY + padding);
-
-    const bbox = {
-      x: minX,
-      y: minY,
-      width: maxX - minX + sampleStep,
-      height: maxY - minY + sampleStep,
-    };
-
-    return { hasChanges: true, boundingBox: bbox, changedRegionBuffer: null };
-  }
-
-  /**
    * Extract region from image buffer
    */
   private extractRegion(imageBuffer: Buffer, width: number, height: number, bbox: { x: number; y: number; width: number; height: number }): Buffer {
@@ -236,124 +160,6 @@ export class ScreenshotCapturer {
     }
 
     return regionBuffer;
-  }
-
-  /**
-   * Capture screenshot with chat area detection and incremental change detection
-   */
-  async capture(): Promise<{
-    imageBuffer: Buffer | null;
-    isIncremental: boolean;
-    boundingBox: { x: number; y: number; width: number; height: number } | null;
-    fullBounds: { width: number; height: number } | null;
-  }> {
-    try {
-      const robot = require('robotjs');
-
-      // Get window bounds with DPI correction
-      const bounds = this.getWindowBounds();
-
-      if (!bounds || bounds.width <= 100 || bounds.height <= 100) {
-        return { imageBuffer: null, isIncremental: false, boundingBox: null, fullBounds: null };
-      }
-
-      // Note: Window activation requires proper handle management
-      // For now, the window should be visible for capture
-
-      // Log position change
-      if (!this.lastWindowBounds ||
-          Math.abs(this.lastWindowBounds.x - bounds.x) > 5 ||
-          Math.abs(this.lastWindowBounds.y - bounds.y) > 5 ||
-          Math.abs(this.lastWindowBounds.width - bounds.width) > 5 ||
-          Math.abs(this.lastWindowBounds.height - bounds.height) > 5) {
-        logger.info(`Detected window at ${bounds.x},${bounds.y} (${bounds.width}x${bounds.height})`);
-        this.lastWindowBounds = bounds;
-        this.chatAreaBounds = null; // Reset on window resize
-      }
-
-      // Capture at physical coordinates
-      const bitmap = robot.screen.capture(bounds.x, bounds.y, bounds.width, bounds.height);
-      const rawPixels = bitmap.image;
-
-      // Convert to PNG
-      const rgbBuffer = Buffer.alloc(bounds.width * bounds.height * 3);
-      for (let i = 0; i < bounds.width * bounds.height; i++) {
-        rgbBuffer[i * 3] = rawPixels[i * 4];
-        rgbBuffer[i * 3 + 1] = rawPixels[i * 4 + 1];
-        rgbBuffer[i * 3 + 2] = rawPixels[i * 4 + 2];
-      }
-
-      // Detect chat area boundary on first capture or when needed
-      if (!this.chatAreaBounds) {
-        const chatStartX = this.detectChatAreaBoundary(rgbBuffer, bounds.width, bounds.height);
-        this.chatAreaBounds = this.detectChatContentArea(rgbBuffer, bounds.width, bounds.height, chatStartX);
-        logger.info(`Chat area detected: x=${this.chatAreaBounds.x}, y=${this.chatAreaBounds.y}, width=${this.chatAreaBounds.width}, height=${this.chatAreaBounds.height}`);
-      }
-
-      // Extract only the chat content area
-      const chatImageBuffer = await sharp(
-        this.extractRegion(rgbBuffer, bounds.width, bounds.height, this.chatAreaBounds),
-        { raw: { width: this.chatAreaBounds.width, height: this.chatAreaBounds.height, channels: 3 } }
-      ).png().toBuffer();
-
-      logger.debug(`Chat area screenshot: ${chatImageBuffer.length} bytes (${this.chatAreaBounds.width}x${this.chatAreaBounds.height})`);
-
-      // Incremental detection
-      let resultBuffer = chatImageBuffer;
-      let isIncremental = false;
-      let boundingBox: { x: number; y: number; width: number; height: number } | null = null;
-
-      if (this.incrementalDetection && this.lastFullScreenshot) {
-        const changeResult = this.findChanges(
-          this.lastFullScreenshot,
-          chatImageBuffer,
-          this.chatAreaBounds.width,
-          this.chatAreaBounds.height
-        );
-
-        if (changeResult.hasChanges && changeResult.boundingBox) {
-          // Extract only the changed region
-          const regionBuffer = this.extractRegion(
-            chatImageBuffer,
-            this.chatAreaBounds.width,
-            this.chatAreaBounds.height,
-            changeResult.boundingBox
-          );
-
-          resultBuffer = await sharp(regionBuffer, {
-            raw: { width: changeResult.boundingBox.width, height: changeResult.boundingBox.height, channels: 3 }
-          }).png().toBuffer();
-
-          isIncremental = true;
-          boundingBox = changeResult.boundingBox;
-
-          logger.info(`Changes detected, incremental region: ${changeResult.boundingBox.width}x${changeResult.boundingBox.height}`);
-        } else {
-          logger.debug('No significant changes detected');
-          return { imageBuffer: null, isIncremental: false, boundingBox: null, fullBounds: null };
-        }
-      }
-
-      // Save full screenshot for next comparison
-      this.lastFullScreenshot = chatImageBuffer;
-
-      if (this.shouldSave) {
-        const type = isIncremental ? 'incremental' : 'full';
-        const filename = path.join(this.saveDir, `chat_${Date.now()}_${type}.png`);
-        fs.writeFileSync(filename, resultBuffer);
-      }
-
-      return {
-        imageBuffer: resultBuffer,
-        isIncremental,
-        boundingBox,
-        fullBounds: { width: this.chatAreaBounds.width, height: this.chatAreaBounds.height },
-      };
-
-    } catch (error) {
-      logger.error('Failed to capture screenshot:', error);
-      return { imageBuffer: null, isIncremental: false, boundingBox: null, fullBounds: null };
-    }
   }
 
   getScreenshotDir(): string {
@@ -375,7 +181,7 @@ export class ScreenshotCapturer {
   }
 
   /**
-   * Capture the full chat area as a PNG buffer (no incremental detection, no side effects).
+   * Capture the full chat area as a PNG buffer.
    * Uses pixel-level separator detection to accurately exclude the sidebar.
    */
   async captureFullChatArea(): Promise<Buffer | null> {
@@ -415,14 +221,6 @@ export class ScreenshotCapturer {
       logger.error('captureFullChatArea failed:', error);
       return null;
     }
-  }
-
-  /**
-   * Force re-detection of chat area on next capture
-   */
-  resetChatAreaDetection(): void {
-    this.chatAreaBounds = null;
-    this.lastFullScreenshot = null;
   }
 }
 

@@ -49,17 +49,14 @@ export const config: Config = {
     apiKey: process.env.VISION_API_KEY,
     temperature: getEnvNumber('VISION_TEMPERATURE', 0.1),
     maxTokens: getEnvNumber('VISION_MAX_TOKENS', 1000),
+    // 消息提取模式: 'vlm' = VLM截图识别, 'text' = 聊天记录文本+OCR
+    extractMode: getEnv('EXTRACT_MODE', 'vlm') as 'vlm' | 'text',
   },
   capture: {
     enabled: getEnvBoolean('CAPTURE_ENABLED', true),
-    interval: getEnvNumber('CAPTURE_INTERVAL', 30000), // 30秒
     windowName: getEnv('CAPTURE_WINDOW_NAME', '微信'),
     saveScreenshots: getEnvBoolean('CAPTURE_SAVE_SCREENSHOTS', false),
     screenshotDir: getEnv('CAPTURE_SCREENSHOT_DIR', 'data/screenshots'),
-    // 是否启用增量检测（只发送新增内容）
-    incrementalDetection: getEnvBoolean('CAPTURE_INCREMENTAL_DETECTION', true),
-    // 截图前是否激活窗口（提到最前）
-    activateWindow: getEnvBoolean('CAPTURE_ACTIVATE_WINDOW', true),
   },
   web: {
     port: getEnvNumber('WEB_PORT', 3000),
@@ -88,9 +85,9 @@ export const config: Config = {
   },
   ocr: {
     // OCR预处理：缩放倍数
-    resizeScale: getEnvNumber('OCR_RESIZE_SCALE', 2),
+    resizeScale: getEnvNumber('OCR_RESIZE_SCALE', 3),
     // OCR预处理：对比度增益
-    contrastGain: getEnvNumber('OCR_CONTRAST_GAIN', 1.3),
+    contrastGain: getEnvNumber('OCR_CONTRAST_GAIN', 1.5),
     // OCR预处理：亮度偏移
     brightnessOffset: getEnvNumber('OCR_BRIGHTNESS_OFFSET', -20),
     // 搜索结果加载等待时间（毫秒）

@@ -16,6 +16,7 @@ import path from 'path';
 interface ScreenshotInfo {
   filepath: string;
   checkpointTime: string; // Format: YYYYMMDD_HHmm
+  mtime: number; // File modification time (for ordering)
 }
 
 /**
@@ -128,17 +129,23 @@ export class VlmCycle {
     for (const file of files) {
       const checkpointTime = parseCheckpointTime(file);
       if (checkpointTime) {
+        const filepath = path.join(patrolDir, file);
+        const stats = fs.statSync(filepath);
         allScreenshots.push({
-          filepath: path.join(patrolDir, file),
+          filepath,
           checkpointTime,
+          mtime: stats.mtimeMs,
         });
       } else {
         logger.warn(`VLM cycle: could not parse checkpoint time from ${file}`);
       }
     }
 
-    // Sort by checkpoint time (ascending - oldest first for stitching)
-    allScreenshots.sort((a, b) => a.checkpointTime.localeCompare(b.checkpointTime));
+    // Sort by file modification time (ascending - oldest first)
+    // Screenshots are taken from new to old (scroll up), so first file = newest message
+    // For stitching: oldest (first scroll) should be at TOP, newest (last scroll) at BOTTOM
+    // So we sort ascending by mtime: first = oldest = top of chat
+    allScreenshots.sort((a, b) => a.mtime - b.mtime);
 
     if (allScreenshots.length === 0) {
       logger.debug(`VLM cycle: no valid screenshots for ${target.name}`);
@@ -152,7 +159,7 @@ export class VlmCycle {
       : allScreenshots;
 
     if (newScreenshots.length === 0) {
-      logger.debug(`VLM cycle: no new screenshots for ${target.name} (last checkpoint: ${lastCheckpoint})`);
+      logger.info(`VLM cycle: no new screenshots for ${target.name} (last checkpoint: ${lastCheckpoint})`);
       return;
     }
 
@@ -161,13 +168,17 @@ export class VlmCycle {
     // Process in batches if there are many accumulated screenshots
     const BATCH_SIZE = 5; // Max screenshots per batch
     const processedCheckpoints: string[] = [];
+    // For timestamp inheritance across batches: track the last timestamp from previous batch
+    let previousBatchLastTimestamp: string | undefined = undefined;
 
     for (let i = 0; i < newScreenshots.length; i += BATCH_SIZE) {
       const batch = newScreenshots.slice(i, i + BATCH_SIZE);
       const batchCheckpointTimes = batch.map(s => s.checkpointTime);
 
       try {
-        await this.processBatch(target, batch);
+        await this.processBatch(target, batch, previousBatchLastTimestamp);
+        // Update previousBatchLastTimestamp for next batch (use the newest checkpoint in this batch)
+        previousBatchLastTimestamp = batch[batch.length - 1]?.checkpointTime;
         // Mark all batch checkpoints as processed
         processedCheckpoints.push(...batchCheckpointTimes);
         logger.debug(`VLM cycle: ${target.name} — processed batch ${Math.floor(i / BATCH_SIZE) + 1} (checkpoints: ${batchCheckpointTimes.join(', ')})`);
@@ -187,25 +198,60 @@ export class VlmCycle {
     }
   }
 
-  private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[]): Promise<void> {
+  private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[], previousBatchLastTimestamp?: string): Promise<void> {
     // Read all PNG buffers from batch
+    // Batch is sorted oldest-first by mtime (first file = oldest = top of chat)
+    // So no reverse needed - oldest is already first for stitching
     const buffers = batch.map(s => fs.readFileSync(s.filepath));
 
-    // Stitch batch screenshots together
+    // Stitch batch screenshots together (oldest on top)
     let stitched = await stitchImages(buffers);
 
     // Enforce max height
     stitched = await enforceMaxHeight(stitched, config.vlm.maxImageHeight);
 
+    // Save stitched image for debugging/inspection
+    const vlmDir = path.join(config.capture.screenshotDir, 'vlm');
+    if (!fs.existsSync(vlmDir)) {
+      fs.mkdirSync(vlmDir, { recursive: true });
+    }
+    const stitchedPath = path.join(vlmDir, `vlm_${target.name}_${Date.now()}.png`);
+    fs.writeFileSync(stitchedPath, stitched);
+    logger.info(`VLM cycle: saved stitched image to ${stitchedPath}`);
+
+    // Get reference time from the oldest screenshot in batch (top of the chat)
+    // Format: YYYYMMDD_HHmm -> "YYYY/M/D HH:mm"
+    // After reverse: oldest is at index 0
+    const oldestCheckpoint = batch[0]?.checkpointTime;
+    let referenceTime: string | undefined;
+
+    const getTimeStr = (checkpointTime: string): string | undefined => {
+      const match = checkpointTime.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
+      if (match) {
+        return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}`;
+      }
+      return undefined;
+    };
+
+    // Use oldest checkpoint if available, otherwise use previous batch's last timestamp
+    if (oldestCheckpoint && oldestCheckpoint !== '00000000_0000') {
+      referenceTime = getTimeStr(oldestCheckpoint);
+    } else if (previousBatchLastTimestamp) {
+      referenceTime = getTimeStr(previousBatchLastTimestamp);
+    }
+
     // Send to VLM with target context
     const result = await this.provider.recognize(stitched, {
       targetName: target.name,
       category: target.category,
+      referenceTime,
     });
     logger.info(`VLM cycle: ${target.name} (batch) — recognized ${result.messages?.length || 0} messages`);
 
     // Override roomName with config target name
     result.roomName = target.name;
+    // Pass referenceTime for timestamp inheritance
+    result.referenceTime = referenceTime;
 
     // Process messages (dedup + save + webhook)
     const monitor = getMonitor();
@@ -214,9 +260,11 @@ export class VlmCycle {
 
     // Update checkpoint with screenshot's timestamp (from OCR), not VLM's time
     // The screenshot filename already has the correct date from OCR
-    if (batch.length > 0) {
+    // Skip screenshots with no timestamp (00000000_0000)
+    const validScreenshots = batch.filter(s => s.checkpointTime !== '00000000_0000');
+    if (validScreenshots.length > 0) {
       // Use the newest screenshot's checkpoint time
-      const newestScreenshot = batch[batch.length - 1];
+      const newestScreenshot = validScreenshots[validScreenshots.length - 1];
       const checkpointTime = newestScreenshot.checkpointTime; // Format: YYYYMMDD_HHmm
       // Convert "20260211_2143" to "2/11 21:43" for parsing
       const parsed = checkpointTime.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);

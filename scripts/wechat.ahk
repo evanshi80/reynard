@@ -105,6 +105,89 @@ else if (action = "scroll_down") {
     Sleep 200
     OutputJSON(true, "scroll_down", "Scrolled down one screen")
 }
+else if (action = "click_three_dots") {
+    ; Click the three dots menu button at top right of chat window
+    ; In WeChat, the three dots (⋮) are typically at:
+    ; - About 40-60px from the right edge
+    ; - About 50-80px from the top (below title bar)
+    winX := A_Args.Length >= 2 ? Integer(A_Args[2]) : 0
+    winY := A_Args.Length >= 3 ? Integer(A_Args[3]) : 0
+    winW := A_Args.Length >= 4 ? Integer(A_Args[4]) : 0
+    winH := A_Args.Length >= 5 ? Integer(A_Args[5]) : 0
+
+    if (winW && winH && winW > 0 && winH > 0) {
+        ; Click at top right area - adjust based on typical WeChat layout
+        ; The three dots are usually in the header area
+        clickX := winX + winW - 50
+        clickY := winY + 60
+        Click clickX, clickY
+        Sleep 500
+        OutputJSON(true, "click_three_dots", "Clicked at " . clickX . "," . clickY)
+    } else {
+        OutputJSON(false, "click_three_dots", "Window coordinates required")
+    }
+}
+else if (action = "select_menu_item") {
+    ; Select a menu item by typing text
+    item := A_Args.Length >= 2 ? A_Args[2] : ""
+    if (item = "") {
+        OutputJSON(false, "select_menu_item", "Menu item text required")
+        ExitApp 1
+    }
+    ; Type to search for menu item, then press Enter
+    Sleep 300
+    Send item
+    Sleep 500
+    Send "{Enter}"
+    Sleep 500
+    OutputJSON(true, "select_menu_item", "Selected: " . item)
+}
+else if (action = "copy_message") {
+    ; Click on a message area, then Ctrl+A Ctrl+C to copy
+    winX := A_Args.Length >= 2 ? Integer(A_Args[2]) : 0
+    winY := A_Args.Length >= 3 ? Integer(A_Args[3]) : 0
+    winW := A_Args.Length >= 4 ? Integer(A_Args[4]) : 0
+    winH := A_Args.Length >= 5 ? Integer(A_Args[5]) : 0
+
+    if (winW && winH && winW > 0 && winH > 0) {
+        ; Clear clipboard first to avoid stale content
+        A_Clipboard := ""
+        Sleep 300
+
+        ; Click in the left portion of chat area where messages typically are
+        clickX := winX + Round(winW * 0.25)
+        clickY := winY + Round(winH * 0.4)
+        Click clickX, clickY
+        Sleep 500
+
+        ; Use Ctrl+A to select all, then Ctrl+C to copy
+        Send "^a"
+        Sleep 300
+        Send "^c"
+        Sleep 500
+
+        OutputJSON(true, "copy_message", "Copied message at " . clickX . "," . clickY)
+    } else {
+        OutputJSON(false, "copy_message", "Window coordinates required")
+    }
+}
+else if (action = "read_clipboard") {
+    ; Read clipboard content and output as JSON
+    Sleep 200
+    content := A_Clipboard
+    ; Escape special characters
+    content := StrReplace(content, "\", "\\")
+    content := StrReplace(content, "`"", "\`"")
+    content := StrReplace(content, "`n", "\n")
+    content := StrReplace(content, "`r", "\r")
+    OutputJSON(true, "read_clipboard", content)
+}
+else if (action = "scroll_history") {
+    ; Scroll up in chat history using PageUp
+    Send "{PgUp}"
+    Sleep 300
+    OutputJSON(true, "scroll_history", "Scrolled up in history")
+}
 else {
     OutputJSON(false, "unknown", "Unknown: " . action)
     ExitApp 1

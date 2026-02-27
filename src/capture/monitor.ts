@@ -87,6 +87,7 @@ export class MessageMonitor {
       return;
     }
 
+    // Process each message - VLM now returns time for every message
     for (const msg of result.messages) {
       const key = this.getMessageKey(result.roomName, msg.sender, msg.content);
 
@@ -113,15 +114,39 @@ export class MessageMonitor {
       }
 
       // Create message record
-      // Try to parse time from LLM response, otherwise use current time
-      let timestamp = Date.now();
-      if (msg.time) {
-        // Use centralized timestamp parsing (handles all formats with local timezone)
-        const checkpoint = createCheckpointFromTimeStr(msg.time, Date.now());
+      // VLM now returns time for every message (inherited from group timestamp)
+      let timestamp: number;
+      // Check if VLM returned a weekday timestamp that conflicts with referenceTime
+      let useReferenceTime = false;
+      if (result.referenceTime) {
+        const vlmHasWeekday = msg.time.match(/周[一二三四五六日]|星期[一二三四五六日]/);
+        if (vlmHasWeekday) {
+          const vlmWeekday = parseVLMWeekday(msg.time);
+          if (vlmWeekday !== null) {
+            const refDate = new Date(result.referenceTime);
+            const refWeekday = refDate.getDay();
+            if (vlmWeekday !== refWeekday) {
+              logger.debug(`[timestamp] VLM weekday mismatch: VLM=${vlmWeekday}, ref=${refWeekday}, using referenceTime`);
+              useReferenceTime = true;
+            }
+          }
+        }
+      }
+
+      if (useReferenceTime && result.referenceTime) {
+        const refDate = new Date(result.referenceTime);
+        const timeMatch = msg.time.match(/(\d{1,2}):(\d{2})/);
+        const hour = timeMatch ? parseInt(timeMatch[1], 10) : 0;
+        const minute = timeMatch ? parseInt(timeMatch[2], 10) : 0;
+        timestamp = new Date(refDate.getFullYear(), refDate.getMonth(), refDate.getDate(), hour, minute, 0, 0).getTime();
+        logger.debug(`[timestamp] Using ref date ${refDate.toISOString().split('T')[0]} with time ${hour}:${minute}`);
+      } else {
+        const parseBaseTime = result.referenceTime ? new Date(result.referenceTime).getTime() : Date.now();
+        const checkpoint = createCheckpointFromTimeStr(msg.time, parseBaseTime);
+        logger.debug(`[timestamp] VLM time="${msg.time}", parsed: ${checkpoint.year}/${checkpoint.month}/${checkpoint.day} ${checkpoint.hour}:${checkpoint.minute}`);
         if (checkpoint.year && checkpoint.month && checkpoint.day) {
           timestamp = new Date(checkpoint.year, checkpoint.month - 1, checkpoint.day, checkpoint.hour, checkpoint.minute, 0, 0).getTime();
         } else {
-          // Simple HH:mm format, use captured time as base
           const capturedTime = this.status.lastCapture ? new Date(this.status.lastCapture) : new Date();
           timestamp = new Date(capturedTime.setHours(checkpoint.hour, checkpoint.minute, 0, 0)).getTime();
         }
@@ -197,6 +222,134 @@ export class MessageMonitor {
     this.seenMessages.clear();
     logger.info('Message cache cleared');
   }
+
+  /**
+   * Get seen messages map (for external access)
+   */
+  getSeenMessages(): Map<string, SeenMessage> {
+    return this.seenMessages;
+  }
+
+  /**
+   * Check if text mode is enabled
+   */
+  isTextMode(): boolean {
+    return config.vision.extractMode === 'text';
+  }
+}
+
+/**
+ * Text mode message extractor
+ * Uses "查找聊天内容" feature instead of VLM
+ */
+export async function extractMessagesTextMode(
+  targetName: string,
+  category: string,
+  checkpoint?: string
+): Promise<number> {
+  if (config.vision.extractMode !== 'text') {
+    logger.debug('[text mode] Text mode not enabled, skipping');
+    return 0;
+  }
+
+  const monitor = getMonitor();
+  const { extractChatHistory, ExtractedMessage } = require('../wechat');
+
+  logger.info(`[text mode] Extracting messages for ${targetName} using chat history`);
+
+  const messages = await extractChatHistory(targetName, category, 10);
+
+  if (messages.length === 0) {
+    logger.info('[text mode] No messages extracted');
+    return 0;
+  }
+
+  // Process extracted messages
+  let savedCount = 0;
+  for (const msg of messages) {
+    // In text mode, we only have content, no sender or time
+    // Use current time as placeholder
+    const timestamp = Date.now();
+    const key = `${targetName}|${'未知'}|${msg.content.substring(0, 50)}`;
+
+    // Check for duplicate
+    const existing = monitor.getSeenMessages().get(key);
+    if (existing) {
+      continue;
+    }
+
+    // Save to database
+    try {
+      const messageRecord = {
+        messageId: `text_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        roomId: targetName,
+        roomName: targetName,
+        talkerId: '未知',
+        talkerName: '未知', // Text mode doesn't capture sender
+        content: msg.content,
+        messageType: 'text',
+        timestamp,
+        rawData: JSON.stringify({
+          ...msg,
+          recognizedAt: new Date().toISOString(),
+          provider: 'text',
+        }),
+      };
+      saveMessage(messageRecord);
+
+      monitor.getSeenMessages().set(key, {
+        roomName: targetName,
+        sender: '未知',
+        content: msg.content,
+        timestamp,
+      });
+
+      savedCount++;
+    } catch (err) {
+      logger.warn('[text mode] Failed to save message:', err);
+    }
+  }
+
+  logger.info(`[text mode] Saved ${savedCount} new messages`);
+  return savedCount;
+}
+
+/**
+ * Parse weekday from VLM timestamp string
+ * Returns: 0=周日, 1=周一, 2=周二, 3=周三, 4=周四, 5=周五, 6=周六, null if not found
+ */
+function parseVLMWeekday(timeStr: string): number | null {
+  const patterns = [
+    { regex: /周日/, day: 0 },
+    { regex: /周一/, day: 1 },
+    { regex: /周二/, day: 2 },
+    { regex: /周三/, day: 3 },
+    { regex: /周四/, day: 4 },
+    { regex: /周五/, day: 5 },
+    { regex: /周六/, day: 6 },
+    { regex: /星期日/, day: 0 },
+    { regex: /星期一/, day: 1 },
+    { regex: /星期二/, day: 2 },
+    { regex: /星期三/, day: 3 },
+    { regex: /星期四/, day: 4 },
+    { regex: /星期五/, day: 5 },
+    { regex: /星期六/, day: 6 },
+    // Fuzzy matches for OCR errors (是期X -> 星期X)
+    { regex: /是期日/, day: 0 },
+    { regex: /是期一/, day: 1 },
+    { regex: /是期二/, day: 2 },
+    { regex: /是期三/, day: 3 },
+    { regex: /是期四/, day: 4 },
+    { regex: /是期五/, day: 5 },
+    { regex: /是期六/, day: 6 },
+  ];
+
+  for (const p of patterns) {
+    if (p.regex.test(timeStr)) {
+      return p.day;
+    }
+  }
+  return null;
 }
 
 // Singleton instance

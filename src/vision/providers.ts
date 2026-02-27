@@ -8,6 +8,7 @@ import { RecognizedMessage } from '../types';
 export interface RecognizeContext {
   targetName: string;   // 配置的目标名称
   category: string;     // "群聊" | "联系人" | "功能"
+  referenceTime?: string; // 参考时间，格式 "YYYY/M/D HH:mm" - 用于顶部没有时间戳时
 }
 
 export interface VisionProvider {
@@ -68,37 +69,46 @@ function buildPrompt(context?: RecognizeContext): string {
       header += `私聊规则：左侧消息的发送者是"${context.targetName}"（对方），右侧消息的发送者是"我"（自己）。\n`;
       header += `重要：右侧消息的sender字段必须填"我"，不要填昵称或其他内容。\n`;
     }
+    // Add reference time for handling messages without visible timestamps
+    if (context.referenceTime) {
+      header += `重要：如果截图中最顶部（或某条消息）没有显示时间戳，但该消息下方有另一个消息显示了时间戳 "${context.referenceTime}"，那么该消息的时间也视为 "${context.referenceTime}"。\n`;
+    }
   }
 
   return `${header}
 重要规则：
 1. 今天日期是 ${today}，星期是 ${weekday}
-2. 时间戳是聚合显示的：如果多条第1条消息上方显示 "19:08"，那么这5条消息的时间都是 19:08
-3. 根据时间戳格式推理完整日期：
-   - 只有 HH:mm（如 09:30）→ 今天的消息，日期 = ${today}
-   - 月/日 HH:mm（如 1/15 09:30）→ 需要根据 ${weekday} 推理
-   - 星期X HH:mm（如 周三 21:30）→ 根据今天 ${weekday} 推理是上周的星期X
-   - 昨天 HH:mm → ${now.getMonth() + 1}/${now.getDate() - 1}
-4. 区分群聊和私聊：
+2. **微信时间戳是聚合UI**：在聊天界面中，时间戳显示在消息组的顶部。例如"14:27"这条时间下面可能有5条消息，这5条消息都使用同一个时间"14:27"。不要把时间戳行当作消息返回！
+3. **严格使用截图中的时间戳**：你必须直接复制截图上显示的时间字符串，不要推理、猜测或转换！
+   - 如果截图显示 "14:27"，time 就填 "14:27"
+   - 如果截图显示 "1/15 09:30"，time 就填 "1/15 09:30"
+   - 如果截图显示 "星期三 20:40"，time 就填 "星期三 20:40"
+   - **绝对不要**把 "14:27" 转换成其他形式！
+4. **每条消息都必须有time**：即使是继承的时间，也要在time字段填写该时间组的聚合时间！
+   - 例如：聚合时间 "14:27" 下面有5条消息，这5条的time都填 "14:27"
+   - 绝对不要填 null！
+5. 区分群聊和私聊：
    - 群聊：每条消息上方有发送者昵称，准确识别昵称
    - 私聊：消息分左右两侧，左侧=对方（sender="${context?.targetName || '对方'}"), 右侧="我"（sender="我"）
 
-请以 JSON 格式返回：
+请以 JSON 格式返回，必须包含 roomName 和 messages：
 {
   "roomName": "${context ? context.targetName : '聊天名称'}",
   "messages": [
-    {
-      "sender": "发送者昵称",
-      "content": "消息内容",
-      "time": "2/11 21:43"
-    }
+    {"index": 0, "sender": "发送者昵称", "content": "消息内容", "time": "14:27"},
+    {"index": 1, "sender": "发送者昵称", "content": "消息内容", "time": "14:27"},
+    {"index": 2, "sender": "发送者昵称", "content": "消息内容", "time": "14:27"},
+    {"index": 3, "sender": "发送者昵称", "content": "消息内容", "time": "昨天 20:30"},
+    {"index": 4, "sender": "发送者昵称", "content": "消息内容", "time": "昨天 20:30"}
   ]
 }
 
 注意：
-- 准确识别聚合时间戳，每条消息都必须有时间
+- **每条消息的time字段必须填写**：即使是继承的时间，也要填写该时间组的聚合时间！
+- index表示消息在截图中的顺序（从顶部0开始递增）
+- **严格严格严格**：time 字段必须完全复制截图中的时间字符串，不要转换！
 - sender必须是准确的发送者昵称，群聊不要漏掉发送者
-- 私聊右侧消息sender必须是"我"，不要填其他内容
+- 私聊右侧消息sender必须是"我"
 - 只返回 JSON，不要包裹在 code block 里。`;
 }
 
@@ -187,6 +197,9 @@ function parseVisionResponse(text: string, providerName: string): RecognizedMess
     logger.debug(`${providerName}: empty response text, returning empty messages`);
     return { roomName: '未知群聊', messages: [] };
   }
+
+  // Log raw response for debugging
+  logger.info(`${providerName}: raw response: ${text}`);
 
   // 1. Direct JSON parse
   try {
@@ -376,7 +389,7 @@ export class DisabledProvider implements VisionProvider {
   async recognize(): Promise<RecognizedMessage> {
     return {
       roomName: '测试群聊',
-      messages: [{ sender: '测试', content: 'LLM 已禁用', time: null }],
+      messages: [{ index: 0, sender: '测试', content: 'LLM 已禁用', time: '' }],
     };
   }
 }
