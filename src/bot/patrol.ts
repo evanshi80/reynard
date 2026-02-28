@@ -736,8 +736,8 @@ export async function startPatrol(): Promise<void> {
         consecutiveNoNewMessages++;
         logger.info(`No new screenshots, backoff level: ${consecutiveNoNewMessages}`);
 
-        // Reset after MAX_BACKOFF
-        if (consecutiveNoNewMessages > MAX_BACKOFF) {
+        // Reset after MAX_BACKOFF (1 -> 2 -> 3 -> reset)
+        if (consecutiveNoNewMessages >= MAX_BACKOFF) {
           logger.info('Max backoff reached, resetting counter');
           consecutiveNoNewMessages = 0;
         }
