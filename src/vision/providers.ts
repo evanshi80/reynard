@@ -71,11 +71,15 @@ function buildPrompt(context?: RecognizeContext): string {
 
   // Add batch context for time order and duplicate handling
   const batchInfo = context?.batchInfo;
-  if (batchInfo) {
-    header += `\n【批处理信息】这是批量图片中的第 ${batchInfo.imageIndex + 1} 张，共 ${batchInfo.imageCount} 张。\n`;
+  if (batchInfo && batchInfo.imageCount > 1) {
+    header += `\n【批处理信息】你将一次分析 ${batchInfo.imageCount} 张图片。\n`;
     header += `图片时间顺序：第1张是最早的历史（顶部），最后1张是最近的消息（底部）。\n`;
-    header += `本张图片的时间范围：${batchInfo.earliestTime} → ${batchInfo.latestTime}\n`;
-    header += `重要：请务必检查并排除与相邻图片重复的消息！相邻图片可能有重叠区域（消息重复出现在两张图片底部和顶部）。\n`;
+    header += `整体时间范围：${batchInfo.earliestTime} → ${batchInfo.latestTime}\n`;
+    header += `重要：\n`;
+    header += `1. 你会看到多张连续的聊天截图，它们之间有重叠区域\n`;
+    header += `2. 必须排除重复消息：同一句话可能同时出现在上一张底部和下一张顶部\n`;
+    header += `3. 判断重复标准：sender相同 + content相同（忽略空格）= 重复，只保留第一次出现的\n`;
+    header += `4. index字段按顺序从0开始编号\n`;
   }
 
   if (context) {
@@ -208,7 +212,7 @@ export class OllamaProvider implements VisionProvider {
 
 /**
  * Shared robust JSON parser for all vision providers.
- * Attempts: direct parse → code block extraction → regex {…} → graceful fallback.
+ * Attempts: direct parse → code block extraction → regex {…} → extract messages array → graceful fallback.
  */
 function parseVisionResponse(text: string, providerName: string): RecognizedMessage {
   const logger = require('../utils/logger').default;
@@ -218,8 +222,9 @@ function parseVisionResponse(text: string, providerName: string): RecognizedMess
     return { roomName: '未知群聊', messages: [] };
   }
 
-  // Log raw response for debugging
-  logger.info(`${providerName}: raw response: ${text}`);
+  // Log raw response for debugging (truncate if too long)
+  const logText = text.length > 500 ? text.substring(0, 500) + '...[truncated]' : text;
+  logger.info(`${providerName}: raw response: ${logText}`);
 
   // 1. Direct JSON parse
   try {
@@ -248,7 +253,39 @@ function parseVisionResponse(text: string, providerName: string): RecognizedMess
     }
   }
 
-  // 4. Graceful fallback — log raw text for debugging, return empty messages
+  // 4. Try to extract messages array specifically (handles truncated JSON)
+  const arrMatch = text.match(/"messages"\s*:\s*(\[[\s\S]*)$/);
+  if (arrMatch) {
+    try {
+      const arrText = arrMatch[1];
+      // Try to find the closing bracket
+      let bracketCount = 0;
+      let endIdx = -1;
+      for (let i = 0; i < arrText.length; i++) {
+        if (arrText[i] === '[') bracketCount++;
+        else if (arrText[i] === ']') {
+          bracketCount--;
+          if (bracketCount === 0) {
+            endIdx = i + 1;
+            break;
+          }
+        }
+      }
+      if (endIdx > 0) {
+        const partialArr = arrText.substring(0, endIdx);
+        const partialJson = `{"messages":${partialArr}}`;
+        const result = JSON.parse(partialJson);
+        if (result.messages && Array.isArray(result.messages)) {
+          logger.info(`${providerName}: extracted ${result.messages.length} messages from truncated response`);
+          return { roomName: result.roomName || '未知群聊', messages: result.messages };
+        }
+      }
+    } catch {
+      // continue to fallback
+    }
+  }
+
+  // 5. Graceful fallback — log raw text for debugging, return empty messages
   logger.warn(`${providerName}: could not parse response as JSON, raw text: ${text.substring(0, 300)}`);
   return { roomName: '未知群聊', messages: [] };
 }
