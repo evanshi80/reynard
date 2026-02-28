@@ -14,6 +14,9 @@ import crypto from 'crypto';
 // Track which targets have been greeted
 const greetedTargets = new Set<string>();
 
+// Unique run ID for this session (prevents screenshot overwrite on restart)
+const runId = String(Date.now()).slice(-6); // Last 6 digits of timestamp
+
 // Track last patrol timestamp per target for scroll position
 const lastPatrolTime: Map<string, number> = new Map();
 
@@ -285,14 +288,14 @@ async function captureCurrentChat(targetName: string, suffix: string, checkpoint
       fs.mkdirSync(patrolDir, { recursive: true });
     }
 
-    // Format checkpoint time for filename (or use placeholder if no checkpoint yet)
-    const checkpointTime = formatCheckpointTimeForFilename(checkpoint);
-    const filename = `patrol_${safeName}_${checkpointTime}_${suffix}.png`;
+    // Format: patrol_<name>_<runId>_<suffix>.png
+    // runId prevents overwriting screenshots from previous runs
+    const filename = `patrol_${safeName}_${runId}_${suffix}.png`;
     const filepath = path.join(patrolDir, filename);
 
     fs.writeFileSync(filepath, pngBuffer);
 
-    logger.info(`Screenshot: ${targetName} (${suffix}) checkpoint=${checkpointTime} -> ${filepath}`);
+    logger.info(`Screenshot: ${targetName} (${suffix}) runId=${runId} -> ${filepath}`);
     return filepath;
   } catch (error) {
     logger.error('Failed to capture screenshot:', error);
@@ -477,25 +480,38 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
             }
 
             // Check if we've reached/scrolled past the old checkpoint
-            // We should stop when we see timestamps AT OR NEWER than checkpoint (scrolled back to start)
-            // If all timestamps are OLDER than checkpoint, there are still new messages to process
+            // Compute screenshot min/max epoch to reason about watermark crossing.
             if (lastCheckpoint) {
-              const hasReachedOrPassedCheckpoint = timestampResults.some(r => {
-                if (!r.parsed) return false;
-                const cp = createCheckpointFromParsed(r.text, r.parsed);
-                // Check if cp is at or newer than lastCheckpoint
-                // isNewer(a, b) returns true if a > b
-                // We want to stop when cp >= lastCheckpoint (i.e., NOT older than)
-                return !isNewer(lastCheckpoint, cp); // cp >= lastCheckpoint
-              });
-              if (hasReachedOrPassedCheckpoint) {
-                if (scrollCount === 0) {
-                  logger.info(`Already at or past checkpoint "${lastCheckpoint.timeStr}", no new messages to capture.`);
-                  newestCheckpoint = lastCheckpoint;
-                } else {
-                  logger.info(`Reached checkpoint "${lastCheckpoint.timeStr}" after ${scrollCount} scrolls, done.`);
+              const epochs = timestampResults
+                .filter(r => r.parsed)
+                .map(r => createCheckpointFromParsed(r.text, r.parsed!).epochMs);
+
+              if (epochs.length > 0) {
+                const minEpoch = Math.min(...epochs);
+                const maxEpoch = Math.max(...epochs);
+                const watermarkEpoch = lastCheckpoint.epochMs;
+
+                // This screenshot contains at least one message at-or-older than watermark.
+                // That means we've reached/passed the old boundary; further scrolling up is unnecessary.
+                const reachedWatermark = minEpoch <= watermarkEpoch;
+
+                // This screenshot contains any message newer than watermark.
+                // Indicates there are new messages to process in this round.
+                const hasNewMessages = maxEpoch > watermarkEpoch;
+
+                logger.debug(`[CP check] minEpoch=${minEpoch}, maxEpoch=${maxEpoch}, watermark=${watermarkEpoch}, reached=${reachedWatermark}, hasNew=${hasNewMessages}`);
+
+                if (reachedWatermark) {
+                  if (!hasNewMessages && scrollCount === 0) {
+                    // First screenshot already at/older than watermark => no new messages in this round.
+                    // Keep watermark unchanged (do NOT overwrite with "today" etc.).
+                    newestCheckpoint = lastCheckpoint;
+                    logger.info(`Already at or past checkpoint "${lastCheckpoint.timeStr}", no new messages to capture.`);
+                  } else {
+                    logger.info(`Reached checkpoint "${lastCheckpoint.timeStr}" after ${scrollCount} scrolls, done.`);
+                  }
+                  break;
                 }
-                break;
               }
             }
           }

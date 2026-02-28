@@ -7,7 +7,6 @@
 import { config } from '../config';
 import { createVisionProvider, VisionProvider, RecognizeContext } from './providers';
 import { getMonitor } from '../capture/monitor';
-import { saveCheckpoint, createCheckpointFromTimeStr, type Checkpoint } from '../bot/patrol';
 import { RecognizedMessage } from '../types';
 
 type Message = {
@@ -22,28 +21,32 @@ import path from 'path';
 
 interface ScreenshotInfo {
   filepath: string;
-  checkpointTime: string; // Format: YYYYMMDD_HHmm
+  orderInfo: string; // Format: runId_screenshotIndex (e.g., "123456_001")
   mtime: number; // File modification time (for ordering)
 }
 
 /**
- * Parse checkpoint time from screenshot filename
- * Format: patrol_<name>_YYYYMMDD_HHmm_<suffix>.png
- * Returns null if parsing fails
+ * Parse order info from screenshot filename
+ * Format: patrol_<name>_<runId>_<suffix>.png
+ * Example: patrol_n8n测试群_123456_001.png
+ * Returns runId_suffix for sorting
  */
-function parseCheckpointTime(filename: string): string | null {
-  // Match pattern: patrol_<name>_YYYYMMDD_HHm_<suffix>.png
-  // Example: patrol_开发群_20260212_2135_1.png
-  const match = filename.match(/patrol_.+_(\d{8}_\d{4})_\d+\.png$/);
-  return match ? match[1] : null;
+function parseOrderInfo(filename: string): string | null {
+  // Match pattern: patrol_<name>_<runId>_<suffix>.png
+  const match = filename.match(/patrol_.+_(\d{6})_(\d+)\.png$/);
+  if (match) {
+    // Return runId_screenshotIndex for sorting
+    return `${match[1]}_${String(parseInt(match[2])).padStart(3, '0')}`;
+  }
+  return null;
 }
 
 /**
- * Compare checkpoint times chronologically
- * Returns true if a > b
+ * Compare order info chronologically
+ * Returns true if a > b (for finding newest)
  */
-function isCheckpointNewer(a: string, b: string): boolean {
-  // Format: YYYYMMDD_HHmm
+function isOrderNewer(a: string, b: string): boolean {
+  // Format: runId_screenshotIndex (e.g., "123456_001")
   // Can compare as strings since they sort lexicographically
   return a > b;
 }
@@ -52,7 +55,7 @@ export class VlmCycle {
   private provider: VisionProvider;
   private timer: NodeJS.Timeout | null = null;
   private isRunning = false;
-  private lastProcessedCheckpoint: Map<string, string> = new Map(); // targetName → checkpointTime
+  private lastProcessedCheckpoint: Map<string, string> = new Map(); // targetName → orderInfo
   private lastCycleTime: string | null = null;
   private targetsProcessedCount = 0;
 
@@ -134,13 +137,13 @@ export class VlmCycle {
       .filter(f => f.startsWith(prefix) && f.endsWith('.png'));
 
     for (const file of files) {
-      const checkpointTime = parseCheckpointTime(file);
-      if (checkpointTime) {
+      const orderInfo = parseOrderInfo(file);
+      if (orderInfo) {
         const filepath = path.join(patrolDir, file);
         const stats = fs.statSync(filepath);
         allScreenshots.push({
           filepath,
-          checkpointTime,
+          orderInfo,
           mtime: stats.mtimeMs,
         });
       } else {
@@ -148,11 +151,10 @@ export class VlmCycle {
       }
     }
 
-    // Sort by file modification time (ascending - oldest first)
-    // Screenshots are taken from new to old (scroll up), so first file = newest message
-    // For stitching: oldest (first scroll) should be at TOP, newest (last scroll) at BOTTOM
-    // So we sort ascending by mtime: first = oldest = top of chat
-    allScreenshots.sort((a, b) => a.mtime - b.mtime);
+    // Sort by checkpoint time (ascending - oldest first)
+    // Checkpoint time format: YYYYMMDD_HHmm - sortable as string
+    // This ensures correct chronological order regardless of file modification time
+    allScreenshots.sort((a, b) => a.orderInfo.localeCompare(b.orderInfo));
 
     if (allScreenshots.length === 0) {
       logger.debug(`VLM cycle: no valid screenshots for ${target.name}`);
@@ -162,7 +164,7 @@ export class VlmCycle {
     // Filter to only screenshots newer than last processed checkpoint
     const lastCheckpoint = this.lastProcessedCheckpoint.get(target.name);
     const newScreenshots = lastCheckpoint
-      ? allScreenshots.filter(s => s.checkpointTime > lastCheckpoint)
+      ? allScreenshots.filter(s => s.orderInfo > lastCheckpoint)
       : allScreenshots;
 
     if (newScreenshots.length === 0) {
@@ -178,7 +180,7 @@ export class VlmCycle {
 
     for (let i = 0; i < newScreenshots.length; i += BATCH_SIZE) {
       const batch = newScreenshots.slice(i, i + BATCH_SIZE);
-      const batchCheckpointTimes = batch.map(s => s.checkpointTime);
+      const batchCheckpointTimes = batch.map(s => s.orderInfo);
 
       try {
         await this.processBatch(target, batch);
@@ -186,7 +188,7 @@ export class VlmCycle {
         processedCheckpoints.push(...batchCheckpointTimes);
         logger.debug(`VLM cycle: ${target.name} — processed batch ${Math.floor(i / BATCH_SIZE) + 1} (checkpoints: ${batchCheckpointTimes.join(', ')})`);
       } catch (error) {
-        logger.error(`VLM cycle: ${target.name} — failed to process batch starting at checkpoint ${batch[0].checkpointTime}:`, error);
+        logger.error(`VLM cycle: ${target.name} — failed to process batch starting at checkpoint ${batch[0].orderInfo}:`, error);
         // On error, delete screenshots for retry on next cycle
         this.cleanupFiles(batch.map(s => s.filepath));
         break;
@@ -195,7 +197,7 @@ export class VlmCycle {
 
     // Update last processed checkpoint to the newest one processed
     if (processedCheckpoints.length > 0) {
-      const newestCheckpoint = processedCheckpoints.reduce((a, b) => isCheckpointNewer(a, b) ? a : b);
+      const newestCheckpoint = processedCheckpoints.reduce((a, b) => isOrderNewer(a, b) ? a : b);
       this.lastProcessedCheckpoint.set(target.name, newestCheckpoint);
       logger.info(`VLM cycle: ${target.name} — updated checkpoint to ${newestCheckpoint}`);
     }
@@ -203,8 +205,8 @@ export class VlmCycle {
 
   private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[]): Promise<void> {
     // Helper to convert checkpoint time to display format
-    const getTimeStr = (checkpointTime: string): string | undefined => {
-      const match = checkpointTime.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
+    const getTimeStr = (orderInfo: string): string | undefined => {
+      const match = orderInfo.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
       if (match) {
         return `${parseInt(match[2])}/${parseInt(match[3])} ${match[4]}:${match[5]}`;
       }
@@ -212,8 +214,8 @@ export class VlmCycle {
     };
 
     // Get time range for the batch
-    const earliestCheckpoint = batch[0]?.checkpointTime;
-    const latestCheckpoint = batch[batch.length - 1]?.checkpointTime;
+    const earliestCheckpoint = batch[0]?.orderInfo;
+    const latestCheckpoint = batch[batch.length - 1]?.orderInfo;
     const earliestTime = earliestCheckpoint && earliestCheckpoint !== '00000000_0000'
       ? getTimeStr(earliestCheckpoint) || '未知'
       : '未知';
@@ -265,19 +267,8 @@ export class VlmCycle {
     await monitor.processMessages(finalResult);
     this.targetsProcessedCount++;
 
-    // Update checkpoint with screenshot's timestamp (from OCR)
-    const validScreenshots = batch.filter(s => s.checkpointTime !== '00000000_0000');
-    if (validScreenshots.length > 0) {
-      const newestScreenshot = validScreenshots[validScreenshots.length - 1];
-      const checkpointTime = newestScreenshot.checkpointTime;
-      const parsed = checkpointTime.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
-      if (parsed) {
-        const timeStr = `${parseInt(parsed[2])}/${parseInt(parsed[3])} ${parsed[4]}:${parsed[5]}`;
-        const checkpoint = createCheckpointFromTimeStr(timeStr, Date.now());
-        saveCheckpoint(target.name, checkpoint);
-        logger.debug(`VLM cycle: ${target.name} — updated checkpoint to ${checkpoint.timeStr}`);
-      }
-    }
+    // Note: Checkpoint is saved by patrol, not VLM
+    // VLM should NOT overwrite checkpoint with derived timestamps
 
     // Cleanup processed screenshots
     if (config.vlm.cleanupProcessed) {
