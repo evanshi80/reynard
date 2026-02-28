@@ -659,9 +659,24 @@ let patrolRunning = false;
 let patrolTimer: NodeJS.Timeout | null = null;
 let patrolRoundCount = 0;
 
+// Backoff state for consecutive rounds with no new screenshots
+let consecutiveNoNewMessages = 0;
+const MAX_BACKOFF = 3;
+const BACKOFF_BASE = 1; // 1 round backoff initially, then 2, then 3, then reset
+
 /**
  * Start patrol loop
  */
+/**
+ * Check if there are any new screenshots in patrol directory
+ * Returns count of screenshot files
+ */
+function countPatrolScreenshots(): number {
+  const patrolDir = path.join(config.capture.screenshotDir, 'patrol');
+  if (!fs.existsSync(patrolDir)) return 0;
+  return fs.readdirSync(patrolDir).filter(f => f.endsWith('.png')).length;
+}
+
 export async function startPatrol(): Promise<void> {
   if (patrolRunning) {
     logger.warn('Patrol already running');
@@ -670,12 +685,16 @@ export async function startPatrol(): Promise<void> {
 
   patrolRunning = true;
   patrolRoundCount = 0;
+  consecutiveNoNewMessages = 0;
   const maxRounds = config.patrol.maxRounds;
   logger.info(`Starting patrol with interval: ${config.patrol.interval}ms (maxRounds: ${maxRounds || 'unlimited'}, greeting: ${config.bot.greetingEnabled ? 'enabled' : 'disabled'})`);
 
   // Run immediately - only count successful patrols towards max rounds
   const initialSuccess = await runPatrol();
   if (initialSuccess) patrolRoundCount++;
+
+  // Track screenshots after first patrol
+  let lastScreenshotCount = countPatrolScreenshots();
 
   // Schedule next runs using setTimeout to prevent overlap
   const scheduleNext = () => {
@@ -685,12 +704,47 @@ export async function startPatrol(): Promise<void> {
       stopPatrol();
       return;
     }
+
+    // Calculate backoff interval
+    let interval = config.patrol.interval;
+    if (consecutiveNoNewMessages > 0) {
+      const backoffRounds = Math.min(consecutiveNoNewMessages, MAX_BACKOFF);
+      interval = config.patrol.interval * backoffRounds;
+      logger.info(`Backoff: waiting ${backoffRounds}x interval (${interval}ms) due to no new messages`);
+    }
+
     patrolTimer = setTimeout(async () => {
       if (!patrolRunning) return;
+
+      const screenshotCountBefore = countPatrolScreenshots();
       const success = await runPatrol();
-      if (success) patrolRoundCount++;
+      const screenshotCountAfter = countPatrolScreenshots();
+
+      // Check if there are new screenshots
+      const hasNewScreenshots = screenshotCountAfter > screenshotCountBefore;
+      lastScreenshotCount = screenshotCountAfter;
+
+      if (hasNewScreenshots) {
+        // Reset backoff counter when new messages found
+        if (consecutiveNoNewMessages > 0) {
+          logger.info('New screenshots found, resetting backoff counter');
+        }
+        consecutiveNoNewMessages = 0;
+        if (success) patrolRoundCount++;
+      } else {
+        // Increment backoff counter
+        consecutiveNoNewMessages++;
+        logger.info(`No new screenshots, backoff level: ${consecutiveNoNewMessages}`);
+
+        // Reset after MAX_BACKOFF
+        if (consecutiveNoNewMessages > MAX_BACKOFF) {
+          logger.info('Max backoff reached, resetting counter');
+          consecutiveNoNewMessages = 0;
+        }
+      }
+
       scheduleNext();
-    }, config.patrol.interval);
+    }, interval);
   };
   scheduleNext();
 }
