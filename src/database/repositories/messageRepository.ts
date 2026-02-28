@@ -12,8 +12,8 @@ export function saveMessage(message: MessageRecord): number | bigint {
     const stmt = db.prepare(`
       INSERT INTO messages (
         message_id, room_id, room_name, talker_id, talker_name,
-        content, message_type, timestamp, raw_data
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        content, message_type, timestamp, msg_index, raw_data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -25,6 +25,7 @@ export function saveMessage(message: MessageRecord): number | bigint {
       message.content,
       message.messageType,
       message.timestamp,
+      message.msgIndex || 0,
       message.rawData
     );
 
@@ -43,6 +44,36 @@ export function saveMessage(message: MessageRecord): number | bigint {
 }
 
 /**
+ * Check if a message with similar content already exists in the room
+ * Uses content hash to detect duplicates
+ */
+export function messageExistsInRoom(roomName: string, content: string, maxTimeDiff: number = 60000): boolean {
+  const db = getDatabase();
+  const now = Date.now();
+  const startTime = now - maxTimeDiff;
+
+  // Normalize content for comparison
+  const contentNorm = content.replace(/\s+/g, '').toLowerCase();
+
+  // Get recent messages from this room
+  const stmt = db.prepare(`
+    SELECT content FROM messages
+    WHERE room_name = ? AND timestamp > ?
+  `);
+
+  const recentMessages = stmt.all(roomName, startTime) as { content: string }[];
+
+  for (const msg of recentMessages) {
+    const msgNorm = msg.content.replace(/\s+/g, '').toLowerCase();
+    if (msgNorm === contentNorm) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Get messages by room ID
  */
 export function getMessagesByRoom(roomId: string, limit: number = 100, offset: number = 0): MessageRecord[] {
@@ -51,7 +82,7 @@ export function getMessagesByRoom(roomId: string, limit: number = 100, offset: n
   const stmt = db.prepare(`
     SELECT * FROM messages
     WHERE room_id = ?
-    ORDER BY timestamp DESC
+    ORDER BY timestamp DESC, msg_index ASC
     LIMIT ? OFFSET ?
   `);
 
@@ -67,7 +98,7 @@ export function getMessagesByTimeRange(startTime: number, endTime: number, limit
   const stmt = db.prepare(`
     SELECT * FROM messages
     WHERE timestamp BETWEEN ? AND ?
-    ORDER BY timestamp DESC
+    ORDER BY timestamp DESC, msg_index ASC
     LIMIT ?
   `);
 

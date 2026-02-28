@@ -353,8 +353,14 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
         dpi
       );
 
-      const downCount = result ? result.downCount : 1; // fallback to 1 (Home lands on 搜一搜, need 1 Down to reach 群聊)
-      logger.info(`Category found at relY=${result?.categoryY}, using ${downCount} Down presses`);
+      // If category not found, skip this patrol round and wait for next attempt
+      if (!result) {
+        logger.warn(`Category "${target.category}" not found, skipping patrol for ${target.name}`);
+        return false;
+      }
+
+      const downCount = result.downCount;
+      logger.info(`Category found at relY=${result.categoryY}, using ${downCount} Down presses`);
 
       // Navigate to result
       const navigateResult = await navigateToResult(target.name, downCount);
@@ -470,16 +476,21 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
               }
             }
 
-            // Check if we've reached the old checkpoint
+            // Check if we've reached/scrolled past the old checkpoint
+            // We should stop when we see timestamps AT OR NEWER than checkpoint (scrolled back to start)
+            // If all timestamps are OLDER than checkpoint, there are still new messages to process
             if (lastCheckpoint) {
-              const reachedCheckpoint = timestampResults.some(r => {
+              const hasReachedOrPassedCheckpoint = timestampResults.some(r => {
                 if (!r.parsed) return false;
                 const cp = createCheckpointFromParsed(r.text, r.parsed);
-                return !isNewer(cp, lastCheckpoint);
+                // Check if cp is at or newer than lastCheckpoint
+                // isNewer(a, b) returns true if a > b
+                // We want to stop when cp >= lastCheckpoint (i.e., NOT older than)
+                return !isNewer(lastCheckpoint, cp); // cp >= lastCheckpoint
               });
-              if (reachedCheckpoint) {
+              if (hasReachedOrPassedCheckpoint) {
                 if (scrollCount === 0) {
-                  logger.info(`No new messages since checkpoint "${lastCheckpoint.timeStr}", done.`);
+                  logger.info(`Already at or past checkpoint "${lastCheckpoint.timeStr}", no new messages to capture.`);
                   newestCheckpoint = lastCheckpoint;
                 } else {
                   logger.info(`Reached checkpoint "${lastCheckpoint.timeStr}" after ${scrollCount} scrolls, done.`);

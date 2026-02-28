@@ -14,7 +14,7 @@ type Message = {
   index: number;
   sender: string;
   content: string;
-  time: string;
+  time: string | null;
 };
 import logger from '../utils/logger';
 import fs from 'fs';
@@ -175,17 +175,13 @@ export class VlmCycle {
     // Process in batches if there are many accumulated screenshots
     const BATCH_SIZE = 5; // Max screenshots per batch
     const processedCheckpoints: string[] = [];
-    // For timestamp inheritance across batches: track the last timestamp from previous batch
-    let previousBatchLastTimestamp: string | undefined = undefined;
 
     for (let i = 0; i < newScreenshots.length; i += BATCH_SIZE) {
       const batch = newScreenshots.slice(i, i + BATCH_SIZE);
       const batchCheckpointTimes = batch.map(s => s.checkpointTime);
 
       try {
-        await this.processBatch(target, batch, previousBatchLastTimestamp);
-        // Update previousBatchLastTimestamp for next batch (use the newest checkpoint in this batch)
-        previousBatchLastTimestamp = batch[batch.length - 1]?.checkpointTime;
+        await this.processBatch(target, batch);
         // Mark all batch checkpoints as processed
         processedCheckpoints.push(...batchCheckpointTimes);
         logger.debug(`VLM cycle: ${target.name} — processed batch ${Math.floor(i / BATCH_SIZE) + 1} (checkpoints: ${batchCheckpointTimes.join(', ')})`);
@@ -205,7 +201,7 @@ export class VlmCycle {
     }
   }
 
-  private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[], previousBatchLastTimestamp?: string): Promise<void> {
+  private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[]): Promise<void> {
     // Helper to convert checkpoint time to display format
     const getTimeStr = (checkpointTime: string): string | undefined => {
       const match = checkpointTime.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
@@ -241,7 +237,7 @@ export class VlmCycle {
     const batchContext: RecognizeContext = {
       targetName: target.name,
       category: target.category,
-      referenceTime: previousBatchLastTimestamp ? getTimeStr(previousBatchLastTimestamp) : undefined,
+      // No referenceTime - let VLM figure out timestamps from images
       batchInfo: {
         imageCount: batch.length,
         imageIndex: 0, // Not used for batch send
@@ -262,7 +258,6 @@ export class VlmCycle {
     const finalResult: RecognizedMessage = {
       roomName: target.name,
       messages: dedupedMessages,
-      referenceTime: latestTime !== '未知' ? latestTime : undefined,
     };
 
     // Process messages (save + webhook)
@@ -291,7 +286,8 @@ export class VlmCycle {
   }
 
   /**
-   * Deduplicate messages based on sender, content, and time similarity
+   * Deduplicate messages based on content similarity
+   * Uses normalized content as primary key, ignores minor time differences
    */
   private deduplicateMessages(messages: Message[]): Message[] {
     if (messages.length === 0) return [];
@@ -300,22 +296,97 @@ export class VlmCycle {
     const result: Message[] = [];
 
     for (const msg of messages) {
-      // Create a key from sender + content (normalized)
+      // Normalize content: remove all whitespace and lowercase
       const contentNorm = msg.content.replace(/\s+/g, '').toLowerCase();
-      const key = `${msg.sender || ''}:${msg.time || ''}:${contentNorm}`;
 
-      if (!seen.has(key)) {
-        seen.set(key, msg);
+      // Skip empty content
+      if (!contentNorm) continue;
+
+      // Use content as primary key - messages with same content are duplicates
+      // even if time differs slightly
+      if (!seen.has(contentNorm)) {
+        seen.set(contentNorm, msg);
         result.push(msg);
       } else {
-        // Keep the one with more complete info
-        const existing = seen.get(key)!;
+        // Keep the one with more complete info (prefer having sender and time)
+        const existing = seen.get(contentNorm)!;
         if (!existing.sender && msg.sender) existing.sender = msg.sender;
         if (!existing.time && msg.time) existing.time = msg.time;
       }
     }
 
-    return result;
+    // Fill in null timestamps by propagating the last known timestamp
+    const filledMessages = this.fillNullTimestamps(result);
+    // Normalize time tokens: unify "HH:mm" with "M/d HH:mm" or "M月d日 HH:mm"
+    return this.normalizeTimeTokens(filledMessages);
+  }
+
+  /**
+   * Normalize time tokens: if same HH:mm appears with and without date prefix,
+   * unify to the longer form (e.g., "2月17日 14:27" wins over "14:27").
+   */
+  private normalizeTimeTokens(messages: Message[]): Message[] {
+    // Build mapping: HH:mm -> longest time string seen for this HH:mm
+    const timeMap = new Map<string, string>();
+
+    for (const msg of messages) {
+      if (!msg.time) continue;
+      // Extract HH:mm from time string
+      const match = msg.time.match(/(\d{1,2}:\d{2})$/);
+      if (match) {
+        const hm = match[1];
+        const existing = timeMap.get(hm);
+        // Keep the longer one
+        if (!existing || (msg.time.length > existing.length)) {
+          timeMap.set(hm, msg.time);
+        }
+      }
+    }
+
+    // Apply normalization
+    for (const msg of messages) {
+      if (!msg.time) continue;
+      const match = msg.time.match(/(\d{1,2}:\d{2})$/);
+      if (match) {
+        const hm = match[1];
+        const normalized = timeMap.get(hm);
+        if (normalized && normalized !== msg.time) {
+          msg.time = normalized;
+        }
+      }
+    }
+
+    return messages;
+  }
+
+  /**
+   * Fill null timestamps by propagating known timestamps.
+   * Pass 1: forward-fill from previous known time.
+   * Pass 2: backward-fill leading nulls from the first known time below.
+   */
+  private fillNullTimestamps(messages: Message[]): Message[] {
+    // Pass 1: forward fill
+    let lastKnownTime: string | null = null;
+    for (const msg of messages) {
+      if (msg.time) {
+        lastKnownTime = msg.time;
+      } else if (lastKnownTime) {
+        msg.time = lastKnownTime;
+      }
+    }
+
+    // Pass 2: backward fill (helps leading nulls)
+    let nextKnownTime: string | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.time) {
+        nextKnownTime = msg.time;
+      } else if (nextKnownTime) {
+        msg.time = nextKnownTime;
+      }
+    }
+
+    return messages;
   }
 
   private cleanupFiles(files: string[]): void {

@@ -71,15 +71,16 @@ export function createRoutes(): Router {
       const db = getDatabase();
       const limit = parseInt(req.query.limit as string) || 200;
       const recentMessages = db.prepare(`
-        SELECT room_name, talker_name, content, timestamp
+        SELECT room_name, talker_name, content, timestamp, msg_index
         FROM messages
-        ORDER BY timestamp DESC
+        ORDER BY timestamp DESC, msg_index ASC
         LIMIT ?
       `).all(limit) as Array<{
         room_name: string;
         talker_name: string;
         content: string;
         timestamp: number;
+        msg_index: number;
       }>;
 
       // Get recent logs
@@ -145,7 +146,7 @@ export function createRoutes(): Router {
 
       const messages = db.prepare(`
         SELECT * FROM messages
-        ORDER BY timestamp DESC
+        ORDER BY timestamp DESC, msg_index ASC
         LIMIT ?
       `).all(limit);
 

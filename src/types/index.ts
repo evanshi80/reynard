@@ -83,6 +83,7 @@ export interface MessageRecord {
   content: string;
   messageType: string;
   timestamp: number;
+  msgIndex?: number;
   rawData: string;
   createdAt?: number;
 }
@@ -104,9 +105,8 @@ export interface RecognizedMessage {
     index: number;      // 消息在截图中的顺序
     sender: string;
     content: string;
-    time: string;      // 必须填写，继承自该时间组的聚合时间
+    time: string | null;      // 时间戳，VLM返回null表示需要从后续消息继承
   }>;
-  referenceTime?: string; // 用于顶部无时间戳时的fallback时间
 }
 
 export interface MonitorStatus {

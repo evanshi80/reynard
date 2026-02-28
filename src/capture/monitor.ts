@@ -2,7 +2,7 @@ import { config } from '../config';
 import { RecognizedMessage } from '../types';
 import { createVisionProvider } from '../vision/providers';
 import { createCheckpointFromTimeStr } from '../bot/patrol';
-import { saveMessage } from '../database/repositories/messageRepository';
+import { saveMessage, messageExistsInRoom } from '../database/repositories/messageRepository';
 import { webhookQueue } from '../webhook/queue';
 import logger from '../utils/logger';
 import { MonitorStatus } from '../types';
@@ -95,6 +95,14 @@ export class MessageMonitor {
         continue;
       }
 
+      // Check database for duplicates (within last 1 minute)
+      if (messageExistsInRoom(result.roomName, msg.content, 60000)) {
+        logger.debug(`[dedup] Skipping duplicate message in DB: ${msg.content.substring(0, 30)}`);
+        // Also mark as seen to avoid reprocessing
+        this.seenMessages.set(key, { roomName: result.roomName, sender: msg.sender, content: msg.content, timestamp: Date.now() });
+        continue;
+      }
+
       // Save seen message
       this.seenMessages.set(key, {
         roomName: result.roomName,
@@ -114,42 +122,18 @@ export class MessageMonitor {
       }
 
       // Create message record
-      // VLM now returns time for every message (inherited from group timestamp)
-      let timestamp: number;
-      // Check if VLM returned a weekday timestamp that conflicts with referenceTime
-      let useReferenceTime = false;
-      if (result.referenceTime) {
-        const vlmHasWeekday = msg.time.match(/周[一二三四五六日]|星期[一二三四五六日]/);
-        if (vlmHasWeekday) {
-          const vlmWeekday = parseVLMWeekday(msg.time);
-          if (vlmWeekday !== null) {
-            const refDate = new Date(result.referenceTime);
-            const refWeekday = refDate.getDay();
-            if (vlmWeekday !== refWeekday) {
-              logger.debug(`[timestamp] VLM weekday mismatch: VLM=${vlmWeekday}, ref=${refWeekday}, using referenceTime`);
-              useReferenceTime = true;
-            }
-          }
-        }
-      }
+      // VLM may return null for time if it can't determine - use current time as fallback
+      const msgTime = msg.time || '现在';
 
-      if (useReferenceTime && result.referenceTime) {
-        const refDate = new Date(result.referenceTime);
-        const timeMatch = msg.time.match(/(\d{1,2}):(\d{2})/);
-        const hour = timeMatch ? parseInt(timeMatch[1], 10) : 0;
-        const minute = timeMatch ? parseInt(timeMatch[2], 10) : 0;
-        timestamp = new Date(refDate.getFullYear(), refDate.getMonth(), refDate.getDate(), hour, minute, 0, 0).getTime();
-        logger.debug(`[timestamp] Using ref date ${refDate.toISOString().split('T')[0]} with time ${hour}:${minute}`);
+      let timestamp: number;
+      const parseBaseTime = Date.now();
+      const checkpoint = createCheckpointFromTimeStr(msgTime, parseBaseTime);
+      logger.debug(`[timestamp] VLM time="${msgTime}", parsed: ${checkpoint.year}/${checkpoint.month}/${checkpoint.day} ${checkpoint.hour}:${checkpoint.minute}`);
+      if (checkpoint.year && checkpoint.month && checkpoint.day) {
+        timestamp = new Date(checkpoint.year, checkpoint.month - 1, checkpoint.day, checkpoint.hour, checkpoint.minute, 0, 0).getTime();
       } else {
-        const parseBaseTime = result.referenceTime ? new Date(result.referenceTime).getTime() : Date.now();
-        const checkpoint = createCheckpointFromTimeStr(msg.time, parseBaseTime);
-        logger.debug(`[timestamp] VLM time="${msg.time}", parsed: ${checkpoint.year}/${checkpoint.month}/${checkpoint.day} ${checkpoint.hour}:${checkpoint.minute}`);
-        if (checkpoint.year && checkpoint.month && checkpoint.day) {
-          timestamp = new Date(checkpoint.year, checkpoint.month - 1, checkpoint.day, checkpoint.hour, checkpoint.minute, 0, 0).getTime();
-        } else {
-          const capturedTime = this.status.lastCapture ? new Date(this.status.lastCapture) : new Date();
-          timestamp = new Date(capturedTime.setHours(checkpoint.hour, checkpoint.minute, 0, 0)).getTime();
-        }
+        const capturedTime = this.status.lastCapture ? new Date(this.status.lastCapture) : new Date();
+        timestamp = new Date(capturedTime.setHours(checkpoint.hour, checkpoint.minute, 0, 0)).getTime();
       }
 
       const messageRecord = {
@@ -161,6 +145,7 @@ export class MessageMonitor {
         content: msg.content,
         messageType: 'text',
         timestamp,
+        msgIndex: (msg as any).index || 0,
         rawData: JSON.stringify({
           ...msg,
           recognizedAt: new Date().toISOString(),
@@ -312,44 +297,6 @@ export async function extractMessagesTextMode(
 
   logger.info(`[text mode] Saved ${savedCount} new messages`);
   return savedCount;
-}
-
-/**
- * Parse weekday from VLM timestamp string
- * Returns: 0=周日, 1=周一, 2=周二, 3=周三, 4=周四, 5=周五, 6=周六, null if not found
- */
-function parseVLMWeekday(timeStr: string): number | null {
-  const patterns = [
-    { regex: /周日/, day: 0 },
-    { regex: /周一/, day: 1 },
-    { regex: /周二/, day: 2 },
-    { regex: /周三/, day: 3 },
-    { regex: /周四/, day: 4 },
-    { regex: /周五/, day: 5 },
-    { regex: /周六/, day: 6 },
-    { regex: /星期日/, day: 0 },
-    { regex: /星期一/, day: 1 },
-    { regex: /星期二/, day: 2 },
-    { regex: /星期三/, day: 3 },
-    { regex: /星期四/, day: 4 },
-    { regex: /星期五/, day: 5 },
-    { regex: /星期六/, day: 6 },
-    // Fuzzy matches for OCR errors (是期X -> 星期X)
-    { regex: /是期日/, day: 0 },
-    { regex: /是期一/, day: 1 },
-    { regex: /是期二/, day: 2 },
-    { regex: /是期三/, day: 3 },
-    { regex: /是期四/, day: 4 },
-    { regex: /是期五/, day: 5 },
-    { regex: /是期六/, day: 6 },
-  ];
-
-  for (const p of patterns) {
-    if (p.regex.test(timeStr)) {
-      return p.day;
-    }
-  }
-  return null;
 }
 
 // Singleton instance

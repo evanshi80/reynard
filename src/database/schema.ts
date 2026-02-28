@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT,
   message_type TEXT,
   timestamp INTEGER,
+  msg_index INTEGER DEFAULT 0,
   raw_data TEXT,
   created_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
@@ -17,4 +18,5 @@ CREATE INDEX IF NOT EXISTS idx_room_id ON messages(room_id);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_talker_id ON messages(talker_id);
 CREATE INDEX IF NOT EXISTS idx_message_id ON messages(message_id);
+CREATE INDEX IF NOT EXISTS idx_room_timestamp ON messages(room_name, timestamp, msg_index);
 `;

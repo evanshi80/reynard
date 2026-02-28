@@ -11,17 +11,27 @@ let worker: Tesseract.Worker | null = null;
  * Fuzzy match: handle common OCR mistakes for category names
  */
 function isFuzzyMatch(ocrText: string, target: string): boolean {
-  if (ocrText === target) return true;
+  // Normalize: remove spaces and lowercase
+  const normalized = ocrText.replace(/\s+/g, '');
 
-  // 群聊 → 群获、群了、群人
-  if (target === '群聊' && ocrText.startsWith('群')) {
-    const second = ocrText[1];
-    if (['获', '了', '人', '友'].includes(second)) return true;
+  if (normalized === target) return true;
+
+  // Check if target is contained anywhere in the text (handles "TiE群聊" case)
+  if (normalized.includes(target)) return true;
+
+  // 群聊 → 群获、群了、群人、群闭 (OCR errors at the beginning)
+  if (target === '群聊') {
+    if (normalized.startsWith('群')) {
+      const second = normalized[1];
+      if (['获', '了', '人', '友', '闭'].includes(second)) return true;
+    }
+    // Also handle text like "TiE群聊" where 群聊 is at the end
+    if (normalized.includes('群聊')) return true;
   }
   // 联系人 → 联系、人、联系人
-  if (target === '联系人' && ocrText.startsWith('联系')) return true;
+  if (target === '联系人' && normalized.startsWith('联系')) return true;
   // 功能 → 功能
-  if (target === '功能' && ocrText.startsWith('功能')) return true;
+  if (target === '功能' && normalized.startsWith('功能')) return true;
 
   return false;
 }

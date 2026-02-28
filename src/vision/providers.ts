@@ -8,7 +8,6 @@ import { RecognizedMessage } from '../types';
 export interface RecognizeContext {
   targetName: string;   // 配置的目标名称
   category: string;     // "群聊" | "联系人" | "功能"
-  referenceTime?: string; // 参考时间，格式 "YYYY/M/D HH:mm" - 用于顶部没有时间戳时
   /** Batch info for multiple images processing */
   batchInfo?: {
     imageCount: number;   // Total images in batch
@@ -89,10 +88,6 @@ function buildPrompt(context?: RecognizeContext): string {
       header += `私聊规则：左侧消息的发送者是"${context.targetName}"（对方），右侧消息的发送者是"我"（自己）。\n`;
       header += `重要：右侧消息的sender字段必须填"我"，不要填昵称或其他内容。\n`;
     }
-    // Add reference time for handling messages without visible timestamps
-    if (context.referenceTime) {
-      header += `重要：如果截图中最顶部（或某条消息）没有显示时间戳，但该消息下方有另一个消息显示了时间戳 "${context.referenceTime}"，那么该消息的时间也视为 "${context.referenceTime}"。\n`;
-    }
   }
 
   return `${header}
@@ -104,33 +99,38 @@ function buildPrompt(context?: RecognizeContext): string {
    - 如果截图显示 "1/15 09:30"，time 就填 "1/15 09:30"
    - 如果截图显示 "星期三 20:40"，time 就填 "星期三 20:40"
    - **绝对不要**把 "14:27" 转换成其他形式！
-4. **每条消息都必须有time**：即使是继承的时间，也要在time字段填写该时间组的聚合时间！
-   - 例如：聚合时间 "14:27" 下面有5条消息，这5条的time都填 "14:27"
-   - 绝对不要填 null！
+4. **重要：顶部消息如果没有可见的时间戳，time 字段填写 null**！
+   - 例如某条消息上方没有时间戳行，time 就填 null
+   - 这表示该消息的时间需要从上一条有时间的消息继承
+3.5 **同组 time 必须一致**：同一个时间戳行（例如 "2月17日 14:27" 或 "14:27"）下面的所有消息，time 字段必须逐字符完全一致！
+   - 例如不能一条写 "14:27" 另一条写 "2月17日 14:27"；必须都写成截图上那一行的原样字符串。
+2.5 **时间戳归属方向（关键！）**：微信聊天界面中，**时间戳显示在消息的上面**！
+   - 例如截图显示 "2月17日 13:23" 这一行，后面紧跟的几条消息都属于这一组
+   - 直到出现下一个时间戳行（如 "2月17日 14:27"），才是下一组
+   - **绝对不要**把下一组的时间戳分配给上一组的消息！
+   - 时间戳行本身不是消息，不要返回它
 5. 区分群聊和私聊：
    - 群聊：每条消息上方有发送者昵称，准确识别昵称
    - 私聊：消息分左右两侧，左侧=对方（sender="${context?.targetName || '对方'}"), 右侧="我"（sender="我"）
-6. **处理重复消息**：批量图片之间可能有重叠区域（同一条消息出现在上一张底部和下一张顶部）。如果发现完全相同或几乎相同的内容（sender相同、content相同、time相近），只保留第一条出现的！
+6. **处理重复消息**：批量图片之间可能有重叠区域（同一条消息出现在上一张底部和下一张顶部）。如果发现完全相同或几乎相同的内容（sender相同、content相同），只保留第一批出现的！
 
 请以 JSON 格式返回，必须包含 roomName 和 messages：
 {
   "roomName": "${context ? context.targetName : '聊天名称'}",
   "messages": [
-    {"index": 0, "sender": "发送者昵称", "content": "消息内容", "time": "14:27"},
-    {"index": 1, "sender": "发送者昵称", "content": "消息内容", "time": "14:27"},
-    {"index": 2, "sender": "发送者昵称", "content": "消息内容", "time": "14:27"},
-    {"index": 3, "sender": "发送者昵称", "content": "消息内容", "time": "昨天 20:30"},
-    {"index": 4, "sender": "发送者昵称", "content": "消息内容", "time": "昨天 20:30"}
+    {"index": 0, "sender": "发送者昵称", "content": "消息A", "time": "2月17日 13:23"},
+    {"index": 1, "sender": "发送者昵称", "content": "消息B", "time": "2月17日 13:23"},
+    {"index": 2, "sender": "发送者昵称", "content": "消息C", "time": "2月17日 14:27"},
+    {"index": 3, "sender": "发送者昵称", "content": "消息D", "time": "2月17日 14:27"}
   ]
 }
 
 注意：
-- **每条消息的time字段必须填写**：即使是继承的时间，也要填写该时间组的聚合时间！
+- **顶部没有可见时间戳的消息，time 必须填 null**！
 - index表示消息在截图中的顺序（从顶部0开始递增）
-- **严格严格严格**：time 字段必须完全复制截图中的时间字符串，不要转换！
-- sender必须是准确的发送者昵称，群聊不要漏掉发送者
-- 私聊右侧消息sender必须是"我"
-- **去重**：如果本张图片的顶部消息与上一张图片的底部消息相同（或高度相似），应该排除
+- time 字段必须完全复制截图中的时间字符串，或者填 null
+- sender必须是准确的发送者昵称
+- **去重**：如果本张图片的顶部消息与上一张图片的底部消息相同，只保留第一批
 - 只返回 JSON，不要包裹在 code block 里。`;
 }
 
