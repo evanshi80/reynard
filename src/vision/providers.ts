@@ -10,10 +10,10 @@ export interface RecognizeContext {
   category: string;     // "群聊" | "联系人" | "功能"
   /** Batch info for multiple images processing */
   batchInfo?: {
-    imageCount: number;   // Total images in batch
-    imageIndex: number;   // Current image index (0-based)
-    earliestTime: string; // Earliest timestamp in batch
-    latestTime: string;   // Latest timestamp in batch
+    imageCount?: number;   // Total images in batch
+    imageIndex?: number;   // Current image index (0-based)
+    earliestTime?: string; // Earliest timestamp in batch
+    latestTime?: string;   // Latest timestamp in batch
   };
 }
 
@@ -70,10 +70,12 @@ function buildPrompt(context?: RecognizeContext): string {
 
   // Add batch context for time order and duplicate handling
   const batchInfo = context?.batchInfo;
-  if (batchInfo && batchInfo.imageCount > 1) {
-    header += `\n【批处理信息】你将一次分析 ${batchInfo.imageCount} 张图片。\n`;
+  if (batchInfo && (batchInfo.imageCount ?? 0) > 1) {
+    header += `\n【批处理信息】你将一次分析 ${batchInfo.imageCount ?? 1} 张图片。\n`;
     header += `图片时间顺序：第1张是最早的历史（顶部），最后1张是最近的消息（底部）。\n`;
-    header += `整体时间范围：${batchInfo.earliestTime} → ${batchInfo.latestTime}\n`;
+    if (batchInfo.earliestTime && batchInfo.latestTime) {
+      header += `整体时间范围：${batchInfo.earliestTime} → ${batchInfo.latestTime}\n`;
+    }
     header += `重要：\n`;
     header += `1. 你会看到多张连续的聊天截图，它们之间有重叠区域\n`;
     header += `2. 必须排除重复消息：同一句话可能同时出现在上一张底部和下一张顶部\n`;

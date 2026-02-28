@@ -1,7 +1,7 @@
 /**
  * VLM Analysis Cycle
  * Periodically collects patrol screenshots and sends them to VLM in batch (no stitching).
- * Uses checkpoint time in filename to track progress and avoids reprocessing.
+ * Uses runId as idempotency unit - processes whole runs as atomic units.
  * Sends images separately with time order info and duplicate handling instructions.
  */
 import { config } from '../config';
@@ -21,41 +21,32 @@ import path from 'path';
 
 interface ScreenshotInfo {
   filepath: string;
-  orderInfo: string; // Format: runId_screenshotIndex (e.g., "123456_001")
-  mtime: number; // File modification time (for ordering)
+  runId: number;   // numeric run id extracted from filename
+  index: number;   // screenshot suffix/index extracted from filename (1,2,3...)
+  mtime: number;    // for tie-break only
 }
 
 /**
- * Parse order info from screenshot filename
+ * Parse runId and screenshot index from screenshot filename
  * Format: patrol_<name>_<runId>_<suffix>.png
- * Example: patrol_n8n测试群_123456_001.png
- * Returns runId_suffix for sorting
+ * Example: patrol_n8n测试群_123456_1.png
  */
-function parseOrderInfo(filename: string): string | null {
-  // Match pattern: patrol_<name>_<runId>_<suffix>.png
+function parseRunAndIndex(filename: string): { runId: number; index: number } | null {
   const match = filename.match(/patrol_.+_(\d{6})_(\d+)\.png$/);
-  if (match) {
-    // Return runId_screenshotIndex for sorting
-    return `${match[1]}_${String(parseInt(match[2])).padStart(3, '0')}`;
-  }
-  return null;
-}
+  if (!match) return null;
 
-/**
- * Compare order info chronologically
- * Returns true if a > b (for finding newest)
- */
-function isOrderNewer(a: string, b: string): boolean {
-  // Format: runId_screenshotIndex (e.g., "123456_001")
-  // Can compare as strings since they sort lexicographically
-  return a > b;
+  const runId = Number(match[1]);
+  const index = Number(match[2]);
+  if (!Number.isFinite(runId) || !Number.isFinite(index)) return null;
+
+  return { runId, index };
 }
 
 export class VlmCycle {
   private provider: VisionProvider;
   private timer: NodeJS.Timeout | null = null;
   private isRunning = false;
-  private lastProcessedCheckpoint: Map<string, string> = new Map(); // targetName → orderInfo
+  private lastProcessedRunId: Map<string, number> = new Map(); // targetName → runId watermark
   private lastCycleTime: string | null = null;
   private targetsProcessedCount = 0;
 
@@ -137,91 +128,114 @@ export class VlmCycle {
       .filter(f => f.startsWith(prefix) && f.endsWith('.png'));
 
     for (const file of files) {
-      const orderInfo = parseOrderInfo(file);
-      if (orderInfo) {
-        const filepath = path.join(patrolDir, file);
-        const stats = fs.statSync(filepath);
-        allScreenshots.push({
-          filepath,
-          orderInfo,
-          mtime: stats.mtimeMs,
-        });
-      } else {
-        logger.warn(`VLM cycle: could not parse checkpoint time from ${file}`);
+      const parsed = parseRunAndIndex(file);
+      if (!parsed) {
+        logger.warn(`VLM cycle: could not parse runId/index from ${file}`);
+        continue;
       }
+
+      const filepath = path.join(patrolDir, file);
+      const stats = fs.statSync(filepath);
+      allScreenshots.push({
+        filepath,
+        runId: parsed.runId,
+        index: parsed.index,
+        mtime: stats.mtimeMs,
+      });
     }
 
-    // Sort by checkpoint time (ascending - oldest first)
-    // Checkpoint time format: YYYYMMDD_HHmm - sortable as string
-    // This ensures correct chronological order regardless of file modification time
-    allScreenshots.sort((a, b) => a.orderInfo.localeCompare(b.orderInfo));
+    // Sort: runId asc (older run first), index desc (older screenshot first within a run)
+    // This ensures: old -> new order for processing
+    allScreenshots.sort((a, b) => {
+      if (a.runId !== b.runId) return a.runId - b.runId;
+      if (a.index !== b.index) return b.index - a.index;
+      return a.mtime - b.mtime;
+    });
 
     if (allScreenshots.length === 0) {
       logger.debug(`VLM cycle: no valid screenshots for ${target.name}`);
       return;
     }
 
-    // Filter to only screenshots newer than last processed checkpoint
-    const lastCheckpoint = this.lastProcessedCheckpoint.get(target.name);
-    const newScreenshots = lastCheckpoint
-      ? allScreenshots.filter(s => s.orderInfo > lastCheckpoint)
+    // Filter: only process runs newer than last processed runId
+    const lastRunId = this.lastProcessedRunId.get(target.name);
+    const newScreenshots = lastRunId !== undefined
+      ? allScreenshots.filter(s => s.runId > lastRunId)
       : allScreenshots;
 
     if (newScreenshots.length === 0) {
-      logger.info(`VLM cycle: no new screenshots for ${target.name} (last checkpoint: ${lastCheckpoint})`);
+      logger.info(`VLM cycle: no new runs for ${target.name} (last runId: ${lastRunId})`);
       return;
     }
 
-    logger.info(`VLM cycle: ${target.name} — ${newScreenshots.length} new screenshot(s) since ${lastCheckpoint || 'beginning'}`);
+    logger.info(`VLM cycle: ${target.name} — ${newScreenshots.length} new screenshot(s) since runId ${lastRunId || 'beginning'}`);
 
-    // Process in batches if there are many accumulated screenshots
-    const BATCH_SIZE = 5; // Max screenshots per batch
-    const processedCheckpoints: string[] = [];
-
-    for (let i = 0; i < newScreenshots.length; i += BATCH_SIZE) {
-      const batch = newScreenshots.slice(i, i + BATCH_SIZE);
-      const batchCheckpointTimes = batch.map(s => s.orderInfo);
-
-      try {
-        await this.processBatch(target, batch);
-        // Mark all batch checkpoints as processed
-        processedCheckpoints.push(...batchCheckpointTimes);
-        logger.debug(`VLM cycle: ${target.name} — processed batch ${Math.floor(i / BATCH_SIZE) + 1} (checkpoints: ${batchCheckpointTimes.join(', ')})`);
-      } catch (error) {
-        logger.error(`VLM cycle: ${target.name} — failed to process batch starting at checkpoint ${batch[0].orderInfo}:`, error);
-        // On error, delete screenshots for retry on next cycle
-        this.cleanupFiles(batch.map(s => s.filepath));
-        break;
-      }
+    // Group screenshots by runId so we can process runs as idempotency units
+    const runs = new Map<number, ScreenshotInfo[]>();
+    for (const s of newScreenshots) {
+      if (!runs.has(s.runId)) runs.set(s.runId, []);
+      runs.get(s.runId)!.push(s);
     }
 
-    // Update last processed checkpoint to the newest one processed
-    if (processedCheckpoints.length > 0) {
-      const newestCheckpoint = processedCheckpoints.reduce((a, b) => isOrderNewer(a, b) ? a : b);
-      this.lastProcessedCheckpoint.set(target.name, newestCheckpoint);
-      logger.info(`VLM cycle: ${target.name} — updated checkpoint to ${newestCheckpoint}`);
+    // Ensure each run's screenshots are in correct order (old -> new)
+    for (const [rid, arr] of runs.entries()) {
+      arr.sort((a, b) => b.index - a.index); // higher index is older => old first
+      runs.set(rid, arr);
+    }
+
+    // Process runs in ascending runId order
+    const runIds = Array.from(runs.keys()).sort((a, b) => a - b);
+
+    const BATCH_SIZE = 5;
+    const OVERLAP = 1; // overlap 1 image between consecutive batches within a run
+
+    for (const runId of runIds) {
+      const screenshots = runs.get(runId)!;
+      logger.info(`VLM cycle: ${target.name} — processing runId=${runId}, ${screenshots.length} screenshot(s)`);
+
+      // Batch with overlap: [0..4], [4..8], [8..12]...
+      for (let start = 0; start < screenshots.length; ) {
+        const end = Math.min(start + BATCH_SIZE, screenshots.length);
+
+        // Include overlap from previous batch (except first batch)
+        const overlapStart = start === 0 ? 0 : Math.max(0, start - OVERLAP);
+        const batch = screenshots.slice(overlapStart, end);
+
+        try {
+          await this.processBatch(target, batch);
+
+          logger.debug(
+            `VLM cycle: ${target.name} — runId=${runId} processed batch [${overlapStart}..${end - 1}] (overlap=${start === 0 ? 0 : OVERLAP})`
+          );
+        } catch (error) {
+          logger.error(`VLM cycle: ${target.name} — runId=${runId} failed batch starting at index=${screenshots[start]?.index}:`, error);
+
+          // On error: delete files in this attempted batch so next cycle can retry
+          this.cleanupFiles(batch.map(s => s.filepath));
+          return; // stop processing this target; do NOT advance watermark
+        }
+
+        // Advance start by (BATCH_SIZE - OVERLAP) after the first batch
+        if (start === 0) {
+          start = end;
+        } else {
+          start = end - OVERLAP;
+        }
+      }
+
+      // Only after a full run is processed successfully, advance watermark
+      this.lastProcessedRunId.set(target.name, runId);
+      logger.info(`VLM cycle: ${target.name} — advanced lastProcessedRunId to ${runId}`);
     }
   }
 
   private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[]): Promise<void> {
-    // Helper to convert checkpoint time to display format
-    const getTimeStr = (orderInfo: string): string | undefined => {
-      const match = orderInfo.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
-      if (match) {
-        return `${parseInt(match[2])}/${parseInt(match[3])} ${match[4]}:${match[5]}`;
-      }
-      return undefined;
-    };
+    // Batch is ordered from old -> new (chronological)
+    // Overlap batches may include duplicate coverage intentionally
 
-    // Get time range for the batch
-    const earliestCheckpoint = batch[0]?.orderInfo;
-    const latestCheckpoint = batch[batch.length - 1]?.orderInfo;
-    const earliestTime = earliestCheckpoint && earliestCheckpoint !== '00000000_0000'
-      ? getTimeStr(earliestCheckpoint) || '未知'
-      : '未知';
-    const latestTime = latestCheckpoint && latestCheckpoint !== '00000000_0000'
-      ? getTimeStr(latestCheckpoint) || '未知'
-      : '未知';
+    const runId = batch[0]?.runId;
+    const oldestIndex = batch[0]?.index;     // because old->new, first is older
+    const newestIndex = batch[batch.length - 1]?.index; // last is newer
 
     // Save batch debug info
     const vlmDir = path.join(config.capture.screenshotDir, 'vlm');
@@ -229,22 +243,19 @@ export class VlmCycle {
       fs.mkdirSync(vlmDir, { recursive: true });
     }
     const batchInfoPath = path.join(vlmDir, `vlm_${target.name}_${Date.now()}_batch.txt`);
-    fs.writeFileSync(batchInfoPath, `Batch: ${batch.length} images\nEarliest: ${earliestTime}\nLatest: ${latestTime}\nFiles:\n${batch.map(s => s.filepath).join('\n')}`);
-    logger.info(`VLM cycle: batch info saved to ${batchInfoPath}`);
+    fs.writeFileSync(batchInfoPath, `Batch: ${batch.length} images\nTarget: ${target.name}\nrunId: ${runId}\nOrder: old -> new\nIndex range: ${oldestIndex} .. ${newestIndex}\nFiles:\n${batch.map(s => s.filepath).join('\n')}`);
+    logger.debug(`VLM cycle: batch info saved to ${batchInfoPath}`);
 
     // Read all image buffers from batch
     const imageBuffers = batch.map(s => fs.readFileSync(s.filepath));
 
-    // Build batch context for time order and duplicate handling
+    // Build batch context - batch is ordered old -> new
     const batchContext: RecognizeContext = {
       targetName: target.name,
       category: target.category,
-      // No referenceTime - let VLM figure out timestamps from images
       batchInfo: {
         imageCount: batch.length,
-        imageIndex: 0, // Not used for batch send
-        earliestTime,
-        latestTime,
+        imageIndex: 0,
       },
     };
 
@@ -266,9 +277,6 @@ export class VlmCycle {
     const monitor = getMonitor();
     await monitor.processMessages(finalResult);
     this.targetsProcessedCount++;
-
-    // Note: Checkpoint is saved by patrol, not VLM
-    // VLM should NOT overwrite checkpoint with derived timestamps
 
     // Cleanup processed screenshots
     if (config.vlm.cleanupProcessed) {
