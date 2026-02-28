@@ -52,6 +52,8 @@ export interface Config {
     brightnessOffset: number;
     // 搜索结果加载等待时间（毫秒）
     searchLoadWait: number;
+    // 是否保存OCR调试图片（裁剪/预处理后）
+    debugArtifacts: boolean;
   };
   patrol: {
     // 巡逻间隔（毫秒）

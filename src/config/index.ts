@@ -92,6 +92,8 @@ export const config: Config = {
     brightnessOffset: getEnvNumber('OCR_BRIGHTNESS_OFFSET', -20),
     // 搜索结果加载等待时间（毫秒）
     searchLoadWait: getEnvNumber('OCR_SEARCH_LOAD_WAIT', 2500),
+    // 是否保存OCR调试图片
+    debugArtifacts: getEnvBoolean('OCR_DEBUG_ARTIFACTS', false),
   },
   patrol: {
     // 巡逻间隔（毫秒）

@@ -2,6 +2,8 @@ import Tesseract from 'tesseract.js';
 import sharp from 'sharp';
 import logger from '../utils/logger';
 import { config } from '../config';
+import fs from 'fs';
+import path from 'path';
 
 let worker: Tesseract.Worker | null = null;
 
@@ -34,7 +36,7 @@ async function getWorker(): Promise<Tesseract.Worker> {
         }
       }
     });
-    // Set parameters for better Chinese OCR
+    // Set default parameters for better Chinese OCR
     await worker.setParameters({
       tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, // Mode 11 - sparse text
     });
@@ -269,32 +271,6 @@ export async function findCategoryPosition(
 }
 
 /**
- * Fuzzy match for weekday recognition
- * Only triggers when there's an explicit weekday prefix like "周", "星期", "是期", "旺期"
- */
-function parseWeekday(text: string): number | null {
-  const clean = text.replace(/\s+/g, '');
-
-  // Only match if there's an explicit weekday marker/prefix
-  // Handles OCR errors: 是期三 / 旺期二 / 汪期二 / 星期三 / 周三
-  const m = clean.match(/(星期|周|是期|旺期|汪期)([一二三四五六日天])/);
-  if (!m) return null;
-
-  const ch = m[2];
-  switch (ch) {
-    case '一': return 1;
-    case '二': return 2;
-    case '三': return 3;
-    case '四': return 4;
-    case '五': return 5;
-    case '六': return 6;
-    case '日':
-    case '天': return 7;
-    default: return null;
-  }
-}
-
-/**
  * Parse timestamp from OCR text
  * Formats:
  * - 当日: HH:mm (e.g., "09:30", "21:45")
@@ -304,90 +280,162 @@ function parseWeekday(text: string): number | null {
  * - 历史中文: M月d日 HH:mm (e.g., "1月15日 09:30", "12月25日 21:30")
  * - 完整日期: YYYY/M/d HH:mm (e.g., "2025/1/15 09:30")
  */
+
+/**
+ * Gate function: check if a line looks like a timestamp before parsing.
+ * This filters out chat content that happens to contain numbers.
+ */
+function looksLikeTimestampLine(clean: string): boolean {
+  // Must contain time structure (H:MM) - minute must be exactly 2 digits
+  // (?!\d) prevents "21:200" from matching
+  if (!/(\d{1,2})[:：](\d{2})(?!\d)/.test(clean)) return false;
+
+  // Timestamps are usually short - reject long strings (likely chat content)
+  if (clean.length > 20) return false;
+
+  // Must have at least one date indicator or be just time
+  const hasDateIndicator = /[月日号昨昨天今周星期]/.test(clean);
+  const isJustTime = /^\d{1,2}[:]\d{2}$/.test(clean);
+
+  return hasDateIndicator || isJustTime;
+}
+
+/**
+ * Grammar whitelist patterns for timestamp parsing.
+ * Each pattern includes a parser function that extracts date/time components.
+ */
+type TimestampParser = (clean: string) => { hour: number; minute: number; month?: number; day?: number; year?: number } | null;
+
+const timestampPatterns: Array<{ name: string; re: RegExp; parse: TimestampParser }> = [
+  // YYYY/M/d HH:mm or YYYY-M-d HH:mm
+  {
+    name: 'full date',
+    re: /^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})[^\d]*(\d{1,2})[:：](\d{2})(?!\d)/,
+    parse: function(clean: string) {
+      const m = this.re.exec(clean);
+      if (!m) return null;
+      return {
+        year: parseInt(m[1], 10),
+        month: parseInt(m[2], 10),
+        day: parseInt(m[3], 10),
+        hour: parseInt(m[4], 10),
+        minute: parseInt(m[5], 10),
+      };
+    }
+  },
+  // M月d日 HH:mm (Chinese date format)
+  {
+    name: 'M月d日',
+    re: /^(\d{1,2})月(\d{1,2})[日号][^\d]*(\d{1,2})[:：](\d{2})(?!\d)/,
+    parse: function(clean: string) {
+      const m = this.re.exec(clean);
+      if (!m) return null;
+      return {
+        month: parseInt(m[1], 10),
+        day: parseInt(m[2], 10),
+        hour: parseInt(m[3], 10),
+        minute: parseInt(m[4], 10),
+      };
+    }
+  },
+  // M/d HH:mm (numeric date format)
+  {
+    name: 'M/d',
+    re: /^(\d{1,2})\/(\d{1,2})[^\d]*(\d{1,2})[:：](\d{2})(?!\d)/,
+    parse: function(clean: string) {
+      const m = this.re.exec(clean);
+      if (!m) return null;
+      return {
+        month: parseInt(m[1], 10),
+        day: parseInt(m[2], 10),
+        hour: parseInt(m[3], 10),
+        minute: parseInt(m[4], 10),
+      };
+    }
+  },
+  // Yesterday: 昨天 HH:mm or 昨日 HH:mm
+  {
+    name: 'yesterday',
+    re: /^(昨天|昨日)[^\d]*(\d{1,2})[:：](\d{2})(?!\d)/,
+    parse: function(clean: string) {
+      const m = this.re.exec(clean);
+      if (!m) return null;
+      const now = new Date();
+      const yesterday = new Date(now);
+      yesterday.setDate(now.getDate() - 1);
+      return {
+        year: yesterday.getFullYear(),
+        month: yesterday.getMonth() + 1,
+        day: yesterday.getDate(),
+        hour: parseInt(m[2], 10),
+        minute: parseInt(m[3], 10),
+      };
+    }
+  },
+  // Weekday: 周X HH:mm or 星期X HH:mm
+  {
+    name: 'weekday',
+    re: /^(周|星期)([一二三四五六日天])[^\d]*(\d{1,2})[:：](\d{2})(?!\d)/,
+    parse: function(clean: string) {
+      const m = this.re.exec(clean);
+      if (!m) return null;
+      const weekdayMap: Record<string, number> = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 };
+      const targetWeekday = weekdayMap[m[2]];
+      if (!targetWeekday) return null;
+
+      const now = new Date();
+      const currentDay = now.getDay() === 0 ? 7 : now.getDay();
+      let diff = currentDay - targetWeekday;
+      if (diff <= 0) diff += 7;
+
+      const targetDate = new Date(now);
+      targetDate.setDate(now.getDate() - diff);
+
+      return {
+        year: targetDate.getFullYear(),
+        month: targetDate.getMonth() + 1,
+        day: targetDate.getDate(),
+        hour: parseInt(m[3], 10),
+        minute: parseInt(m[4], 10),
+      };
+    }
+  },
+  // Just time: HH:mm (today)
+  {
+    name: 'time only',
+    re: /^(\d{1,2})[:：](\d{2})(?!\d)$/,
+    parse: function(clean: string) {
+      const m = this.re.exec(clean);
+      if (!m) return null;
+      return {
+        hour: parseInt(m[1], 10),
+        minute: parseInt(m[2], 10),
+      };
+    }
+  },
+];
+
 export function parseTimestamp(text: string): { hour: number; minute: number; month?: number; day?: number; year?: number } | null {
   // Remove all whitespace
-  const clean = text.replace(/\s+/g, '');
+  let clean = text.replace(/\s+/g, '');
 
-  // Extract time first (required)
-  const timeMatch = clean.match(/(\d{1,2}):(\d{2})/);
-  if (!timeMatch) return null;
-
-  const hour = parseInt(timeMatch[1], 10);
-  const minute = parseInt(timeMatch[2], 10);
-
-  // Validate hour range
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+  // First gate: check if line looks like a timestamp
+  if (!looksLikeTimestampLine(clean)) {
     return null;
   }
 
-  // Extract date if present
-  let month: number | undefined;
-  let day: number | undefined;
-  let year: number | undefined;
-
-  // Helper to set date to yesterday
-  const setYesterday = () => {
-    const now = new Date();
-    const yesterday = new Date(now);
-    yesterday.setDate(now.getDate() - 1);
-    year = yesterday.getFullYear();
-    month = yesterday.getMonth() + 1;
-    day = yesterday.getDate();
-  };
-
-  // Helper to set date to specific weekday (last occurrence, not today)
-  const setWeekday = (weekdayNum: number) => {
-    const now = new Date();
-    // Convert: JS Sunday=0 → Chinese Sunday=7 (end of week), Monday=1 stays Monday
-    const currentDay = now.getDay() === 0 ? 7 : now.getDay();
-    const targetWeekday = weekdayNum === 0 ? 7 : weekdayNum;
-
-    // Calculate days ago for this weekday
-    let diff = currentDay - targetWeekday;
-    if (diff <= 0) diff += 7; // If target is today or ahead, go back a week
-
-    const targetDate = new Date(now);
-    targetDate.setDate(now.getDate() - diff);
-
-    year = targetDate.getFullYear();
-    month = targetDate.getMonth() + 1;
-    day = targetDate.getDate();
-  };
-
-  // Parse order: explicit dates first, then weekday as fallback
-  // This prevents weekday from overwriting more reliable explicit dates
-
-  // 1) YYYY/M/d or YYYY-M-d (full date) - highest priority
-  const fullDateMatch = clean.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
-  if (fullDateMatch) {
-    year = parseInt(fullDateMatch[1], 10);
-    month = parseInt(fullDateMatch[2], 10);
-    day = parseInt(fullDateMatch[3], 10);
-  }
-
-  // 2) M/d or M月d日 (month/day) - second priority
-  if (month === undefined) {
-    const dateMatch = clean.match(/(\d{1,2})[\/\月](\d{1,2})[\日]?/);
-    if (dateMatch) {
-      month = parseInt(dateMatch[1], 10);
-      day = parseInt(dateMatch[2], 10);
+  // Grammar whitelist: try each pattern in priority order
+  for (const pattern of timestampPatterns) {
+    const result = pattern.parse.call({ re: pattern.re }, clean);
+    if (result && result.hour >= 0 && result.hour <= 23 && result.minute >= 0 && result.minute <= 59) {
+      // Validate month/day ranges
+      if (result.month !== undefined && (result.month < 1 || result.month > 12)) continue;
+      if (result.day !== undefined && (result.day < 1 || result.day > 31)) continue;
+      return result;
     }
   }
 
-  // 3) 昨天 / 昨日 (yesterday) - third priority
-  if (month === undefined && (clean.includes('昨天') || clean.includes('昨日'))) {
-    setYesterday();
-  }
-
-  // 4) Weekday - lowest priority, only if no explicit date found
-  if (month === undefined) {
-    const weekday = parseWeekday(clean);
-    if (weekday !== null) {
-      setWeekday(weekday);
-    }
-  }
-
-  return { hour, minute, ...(month !== undefined && { month }), ...(day !== undefined && { day }), ...(year !== undefined && { year }) };
+  return null;
 }
 
 /**
@@ -399,26 +447,105 @@ export async function recognizeTimestamps(
   width: number,
   height: number,
 ): Promise<Array<{ y: number; text: string; parsed: ReturnType<typeof parseTimestamp> }>> {
-  // Preprocess image for better OCR accuracy
-  // First get image dimensions from the buffer
-  const imageMeta = await sharp(imageBuffer).metadata();
-  const imgWidth = imageMeta.width || 0;
-  const imgHeight = imageMeta.height || 0;
+  const meta = await sharp(imageBuffer).metadata();
+  const imgW = meta.width || 0;
+  const imgH = meta.height || 0;
+  if (!imgW || !imgH) return [];
 
-  // Convert PNG to raw RGBA pixels for preprocessImage
-  const rawPixels = await sharp(imageBuffer)
-    .ensureAlpha()
-    .raw()
+  // Debug: ensure debug directory exists
+  const debugDir = 'data/ocr_debug';
+  if (config.ocr.debugArtifacts && !fs.existsSync(debugDir)) {
+    fs.mkdirSync(debugDir, { recursive: true });
+  }
+
+  // 1) Crop to center strip (timestamps are centered; bubbles are left/right)
+  const cropLeft = Math.floor(imgW * 0.25);
+  const cropWidth = Math.floor(imgW * 0.5);
+
+  const cropped = await sharp(imageBuffer)
+    .extract({ left: cropLeft, top: 0, width: cropWidth, height: imgH })
     .toBuffer();
 
-  const preprocessed = await preprocessImage(rawPixels, imgWidth, imgHeight);
+  // Save cropped debug image
+  if (config.ocr.debugArtifacts) {
+    const ts = Date.now();
+    await sharp(cropped).png().toFile(path.join(debugDir, `ts_cropped_${ts}.png`));
+    logger.debug(`[OCR debug] Saved cropped image: ts_cropped_${ts}.png`);
+  }
+
+  // 2) Preprocess specifically for faint gray timestamp text
+  const preprocessed = await sharp(cropped)
+    .ensureAlpha()
+    .resize({ width: cropWidth * 2, height: imgH * 2, kernel: 'lanczos3' }) // upscale 2x
+    .grayscale()
+    .normalize()     // expand contrast automatically
+    .sharpen()
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+
+  // Save preprocessed debug image
+  if (config.ocr.debugArtifacts) {
+    const ts = Date.now();
+    await sharp(preprocessed).png().toFile(path.join(debugDir, `ts_preprocessed_${ts}.png`));
+    logger.debug(`[OCR debug] Saved preprocessed image: ts_preprocessed_${ts}.png`);
+  }
 
   const w = await getWorker();
-  const { data } = await w.recognize(preprocessed, {}, { blocks: true });
+
+  // Character whitelist for timestamps - must match parseTimestamp patterns
+  const TS_WHITELIST =
+    '0123456789:年月日昨天今日周星期一二三四五六日天';
+
+  // Configure worker for timestamp OCR: PSM 11 (sparse text) + no dictionary
+  await w.setParameters({
+    tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT, // PSM 11 - better for sparse timestamps
+    tessedit_char_whitelist: TS_WHITELIST,
+    load_system_dawg: '0', // Disable dictionary to prevent "correction" of broken chars
+    load_freq_dawg: '0',
+  });
+
+  // First pass: try preprocessed image
+  let { data } = await w.recognize(preprocessed, {}, { blocks: true });
+
+  // Count how many timestamps we parsed from first pass
+  let parsedCount = 0;
+  if (data.blocks) {
+    for (const block of data.blocks) {
+      for (const para of block.paragraphs) {
+        for (const line of para.lines) {
+          const text = line.text.trim().replace(/\s+/g, '');
+          if (parseTimestamp(text)) parsedCount++;
+        }
+      }
+    }
+  }
+
+  // Fallback: if first pass found nothing, try binarized image
+  if (parsedCount === 0) {
+    logger.info('[OCR timestamp] Pass A parsedCount=0, retrying with binarized pass B');
+
+    // Create binarized image for faint timestamps
+    const binarized = await sharp(cropped)
+      .ensureAlpha()
+      .resize({ width: cropWidth * 3, height: imgH * 3, kernel: 'lanczos3' }) // 3x upscale
+      .grayscale()
+      .linear(2.2, -110) // Strong contrast stretch
+      .threshold(180)    // Binarize
+      .png({ compressionLevel: 9 })
+      .toBuffer();
+
+    // Save binarized debug image
+    if (config.ocr.debugArtifacts) {
+      const ts = Date.now();
+      await sharp(binarized).png().toFile(path.join(debugDir, `ts_binarized_${ts}.png`));
+      logger.debug(`[OCR debug] Saved binarized image: ts_binarized_${ts}.png`);
+    }
+
+    ({ data } = await w.recognize(binarized, {}, { blocks: true }));
+  }
 
   const results: Array<{ y: number; text: string; parsed: ReturnType<typeof parseTimestamp> }> = [];
 
-  // Extract text lines with position
   const allLines: Tesseract.Line[] = [];
   if (data.blocks) {
     for (const block of data.blocks) {
@@ -430,20 +557,107 @@ export async function recognizeTimestamps(
     }
   }
 
-  // Check each line for timestamp pattern
+  // Log all raw OCR lines for debugging
+  logger.info(`[OCR timestamp] Raw lines count: ${allLines.length}`);
   for (const line of allLines) {
-    const text = line.text.trim().replace(/\s+/g, '');
-    const parsed = parseTimestamp(text);
-    if (parsed) {
-      // Normalize Y position
-      const y = Math.round(line.bbox.y0 / config.ocr.resizeScale);
-      results.push({ y, text, parsed });
-      logger.debug(`Found timestamp: "${text}" at y=${y}`);
+    const rawText = line.text.trim();
+    const cleanedText = rawText.replace(/\s+/g, '');
+    const yPos = Math.round(line.bbox.y0 / 2); // scale=2
+    logger.info(`[OCR raw] y=${yPos}: "${rawText}" -> cleaned: "${cleanedText}"`);
+  }
+
+  // IMPORTANT: bbox is in the CROPPED+SCALED coordinate space.
+  // We only need relative order, but for logging we map back to original roughly.
+  const scale = 2; // we resized 2x
+
+  // Group OCR fragments by y proximity and merge them
+  type OcrFrag = { y: number; x: number; text: string };
+
+  const frags: OcrFrag[] = allLines
+    .map((line) => ({
+      y: Math.round(line.bbox.y0 / scale),
+      x: Math.round(line.bbox.x0),
+      text: line.text.trim().replace(/\s+/g, ''),
+    }))
+    .filter(f => f.text.length > 0);
+
+  // Group fragments by y proximity (same visual row)
+  const Y_TOL = 8; // tolerance in pixels
+  const groups: Array<{ y: number; items: OcrFrag[] }> = [];
+
+  for (const f of frags.sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const g = groups.length ? groups[groups.length - 1] : null;
+    if (!g || Math.abs(f.y - g.y) > Y_TOL) {
+      groups.push({ y: f.y, items: [f] });
+    } else {
+      // Merge into current group; keep group's y as running average
+      g.items.push(f);
+      g.y = Math.round((g.y * (g.items.length - 1) + f.y) / g.items.length);
     }
   }
 
-  // Sort by Y position (top to bottom)
+  // Build merged candidate lines and parse
+  for (const g of groups) {
+    const merged = g.items
+      .sort((a, b) => a.x - b.x)
+      .map(i => i.text)
+      .join('');
+
+    // Try candidates: first the heuristic-recovered version, then raw merged
+    const candidates: string[] = [merged];
+
+    // Token-aware recovery: use OCR token boundaries to recover "M月D日"
+    // This avoids the bug where "21120:54" gets wrongly split as "21月12日0:54"
+    const tokens = g.items
+      .sort((a, b) => a.x - b.x)
+      .map(i => i.text);
+
+    const timeTokenIdx = tokens.findIndex(t => /^(\d{1,2})[:：](\d{2})(?!\d)$/.test(t));
+
+    if (timeTokenIdx >= 0) {
+      const timeTok = tokens[timeTokenIdx];
+
+      // Case: ["2","11","20:54"] -> "2月11日20:54"
+      const mTok = tokens[timeTokenIdx - 2];
+      const dTok = tokens[timeTokenIdx - 1];
+
+      if (mTok && dTok && /^\d{1,2}$/.test(mTok) && /^\d{1,2}$/.test(dTok)) {
+        candidates.unshift(`${mTok}月${dTok}日${timeTok}`);
+      }
+
+      // Optional: ["2","月","11","日","20:54"] or with "号"
+      if (timeTokenIdx >= 4) {
+        const m2 = tokens[timeTokenIdx - 4];
+        const sep1 = tokens[timeTokenIdx - 3];
+        const d2 = tokens[timeTokenIdx - 2];
+        const sep2 = tokens[timeTokenIdx - 1];
+
+        if (m2 && sep1 && d2 && sep2 &&
+            /^\d{1,2}$/.test(m2) && sep1 === '月' &&
+            /^\d{1,2}$/.test(d2) && (sep2 === '日' || sep2 === '号')) {
+          candidates.unshift(`${m2}月${d2}${sep2}${timeTok}`);
+        }
+      }
+    }
+
+    for (const text of candidates) {
+      const parsed = parseTimestamp(text);
+      if (parsed) {
+        results.push({ y: g.y, text, parsed });
+        logger.info(`[OCR timestamp] merged "${text}" at y=${g.y} -> parsed: ${JSON.stringify(parsed)}`);
+        break; // stop at first successful candidate
+      }
+    }
+  }
+
   results.sort((a, b) => a.y - b.y);
+
+  // Restore default parameters for category search (next OCR call)
+  // Note: load_system_dawg/freq_dawg can only be set at init, so we only reset PSM and whitelist
+  await w.setParameters({
+    tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
+    tessedit_char_whitelist: '',
+  });
 
   return results;
 }
