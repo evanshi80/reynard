@@ -9,6 +9,13 @@ export interface RecognizeContext {
   targetName: string;   // 配置的目标名称
   category: string;     // "群聊" | "联系人" | "功能"
   referenceTime?: string; // 参考时间，格式 "YYYY/M/D HH:mm" - 用于顶部没有时间戳时
+  /** Batch info for multiple images processing */
+  batchInfo?: {
+    imageCount: number;   // Total images in batch
+    imageIndex: number;   // Current image index (0-based)
+    earliestTime: string; // Earliest timestamp in batch
+    latestTime: string;   // Latest timestamp in batch
+  };
 }
 
 export interface VisionProvider {
@@ -52,7 +59,7 @@ export function createVisionProvider(): VisionProvider {
 }
 
 /**
- * Build extraction prompt, optionally enriched with target context.
+ * Build extraction prompt for single image, with batch context for time order and duplicate handling.
  */
 function buildPrompt(context?: RecognizeContext): string {
   const now = new Date();
@@ -61,6 +68,15 @@ function buildPrompt(context?: RecognizeContext): string {
   const weekday = weekdays[now.getDay()];
 
   let header = '分析这张微信聊天截图，提取所有消息内容。\n';
+
+  // Add batch context for time order and duplicate handling
+  const batchInfo = context?.batchInfo;
+  if (batchInfo) {
+    header += `\n【批处理信息】这是批量图片中的第 ${batchInfo.imageIndex + 1} 张，共 ${batchInfo.imageCount} 张。\n`;
+    header += `图片时间顺序：第1张是最早的历史（顶部），最后1张是最近的消息（底部）。\n`;
+    header += `本张图片的时间范围：${batchInfo.earliestTime} → ${batchInfo.latestTime}\n`;
+    header += `重要：请务必检查并排除与相邻图片重复的消息！相邻图片可能有重叠区域（消息重复出现在两张图片底部和顶部）。\n`;
+  }
 
   if (context) {
     const isGroup = context.category === '群聊';
@@ -90,6 +106,7 @@ function buildPrompt(context?: RecognizeContext): string {
 5. 区分群聊和私聊：
    - 群聊：每条消息上方有发送者昵称，准确识别昵称
    - 私聊：消息分左右两侧，左侧=对方（sender="${context?.targetName || '对方'}"), 右侧="我"（sender="我"）
+6. **处理重复消息**：批量图片之间可能有重叠区域（同一条消息出现在上一张底部和下一张顶部）。如果发现完全相同或几乎相同的内容（sender相同、content相同、time相近），只保留第一条出现的！
 
 请以 JSON 格式返回，必须包含 roomName 和 messages：
 {
@@ -109,6 +126,7 @@ function buildPrompt(context?: RecognizeContext): string {
 - **严格严格严格**：time 字段必须完全复制截图中的时间字符串，不要转换！
 - sender必须是准确的发送者昵称，群聊不要漏掉发送者
 - 私聊右侧消息sender必须是"我"
+- **去重**：如果本张图片的顶部消息与上一张图片的底部消息相同（或高度相似），应该排除
 - 只返回 JSON，不要包裹在 code block 里。`;
 }
 

@@ -1,14 +1,21 @@
 /**
  * VLM Analysis Cycle
- * Periodically collects patrol screenshots, stitches them, and sends to VLM for recognition.
+ * Periodically collects patrol screenshots and sends them to VLM in batch (no stitching).
  * Uses checkpoint time in filename to track progress and avoids reprocessing.
- * Updates checkpoint files after processing to sync OCR and VLM timestamps.
+ * Sends images separately with time order info and duplicate handling instructions.
  */
 import { config } from '../config';
-import { createVisionProvider, VisionProvider } from './providers';
-import { stitchImages, enforceMaxHeight } from './imageStitcher';
+import { createVisionProvider, VisionProvider, RecognizeContext } from './providers';
 import { getMonitor } from '../capture/monitor';
 import { saveCheckpoint, createCheckpointFromTimeStr, type Checkpoint } from '../bot/patrol';
+import { RecognizedMessage } from '../types';
+
+type Message = {
+  index: number;
+  sender: string;
+  content: string;
+  time: string;
+};
 import logger from '../utils/logger';
 import fs from 'fs';
 import path from 'path';
@@ -199,74 +206,97 @@ export class VlmCycle {
   }
 
   private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[], previousBatchLastTimestamp?: string): Promise<void> {
-    // Read all PNG buffers from batch
-    // Batch is sorted oldest-first by mtime (first file = oldest = top of chat)
-    // So no reverse needed - oldest is already first for stitching
-    const buffers = batch.map(s => fs.readFileSync(s.filepath));
-
-    // Stitch batch screenshots together (oldest on top)
-    let stitched = await stitchImages(buffers);
-
-    // Enforce max height
-    stitched = await enforceMaxHeight(stitched, config.vlm.maxImageHeight);
-
-    // Save stitched image for debugging/inspection
-    const vlmDir = path.join(config.capture.screenshotDir, 'vlm');
-    if (!fs.existsSync(vlmDir)) {
-      fs.mkdirSync(vlmDir, { recursive: true });
-    }
-    const stitchedPath = path.join(vlmDir, `vlm_${target.name}_${Date.now()}.png`);
-    fs.writeFileSync(stitchedPath, stitched);
-    logger.info(`VLM cycle: saved stitched image to ${stitchedPath}`);
-
-    // Get reference time from the oldest screenshot in batch (top of the chat)
-    // Format: YYYYMMDD_HHmm -> "YYYY/M/D HH:mm"
-    // After reverse: oldest is at index 0
-    const oldestCheckpoint = batch[0]?.checkpointTime;
-    let referenceTime: string | undefined;
-
+    // Helper to convert checkpoint time to display format
     const getTimeStr = (checkpointTime: string): string | undefined => {
       const match = checkpointTime.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
       if (match) {
-        return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}`;
+        return `${parseInt(match[2])}/${parseInt(match[3])} ${match[4]}:${match[5]}`;
       }
       return undefined;
     };
 
-    // Use oldest checkpoint if available, otherwise use previous batch's last timestamp
-    if (oldestCheckpoint && oldestCheckpoint !== '00000000_0000') {
-      referenceTime = getTimeStr(oldestCheckpoint);
-    } else if (previousBatchLastTimestamp) {
-      referenceTime = getTimeStr(previousBatchLastTimestamp);
+    // Get time range for the batch
+    const earliestCheckpoint = batch[0]?.checkpointTime;
+    const latestCheckpoint = batch[batch.length - 1]?.checkpointTime;
+    const earliestTime = earliestCheckpoint && earliestCheckpoint !== '00000000_0000'
+      ? getTimeStr(earliestCheckpoint) || '未知'
+      : '未知';
+    const latestTime = latestCheckpoint && latestCheckpoint !== '00000000_0000'
+      ? getTimeStr(latestCheckpoint) || '未知'
+      : '未知';
+
+    // Save batch debug info
+    const vlmDir = path.join(config.capture.screenshotDir, 'vlm');
+    if (!fs.existsSync(vlmDir)) {
+      fs.mkdirSync(vlmDir, { recursive: true });
+    }
+    const batchInfoPath = path.join(vlmDir, `vlm_${target.name}_${Date.now()}_batch.txt`);
+    fs.writeFileSync(batchInfoPath, `Batch: ${batch.length} images\nEarliest: ${earliestTime}\nLatest: ${latestTime}\nFiles:\n${batch.map(s => s.filepath).join('\n')}`);
+    logger.info(`VLM cycle: batch info saved to ${batchInfoPath}`);
+
+    // Process each image separately and collect all messages
+    const allMessages: Message[] = [];
+    let previousRefTime = previousBatchLastTimestamp ? getTimeStr(previousBatchLastTimestamp) : undefined;
+
+    for (let i = 0; i < batch.length; i++) {
+      const screenshot = batch[i];
+      const buffer = fs.readFileSync(screenshot.filepath);
+
+      // Determine reference time for this image
+      let referenceTime = previousRefTime;
+      if (screenshot.checkpointTime && screenshot.checkpointTime !== '00000000_0000') {
+        referenceTime = getTimeStr(screenshot.checkpointTime);
+      }
+
+      // Build batch context for time order and duplicate handling
+      const batchContext: RecognizeContext = {
+        targetName: target.name,
+        category: target.category,
+        referenceTime,
+        batchInfo: {
+          imageCount: batch.length,
+          imageIndex: i,
+          earliestTime,
+          latestTime,
+        },
+      };
+
+      // Send to VLM
+      const result = await this.provider.recognize(buffer, batchContext);
+      logger.info(`VLM cycle: ${target.name} (image ${i + 1}/${batch.length}) — recognized ${result.messages?.length || 0} messages`);
+
+      // Add messages to collection (VLM should handle dedup based on prompt)
+      if (result.messages) {
+        allMessages.push(...result.messages);
+      }
+
+      // Update reference time for next image
+      if (screenshot.checkpointTime && screenshot.checkpointTime !== '00000000_0000') {
+        previousRefTime = getTimeStr(screenshot.checkpointTime);
+      }
     }
 
-    // Send to VLM with target context
-    const result = await this.provider.recognize(stitched, {
-      targetName: target.name,
-      category: target.category,
-      referenceTime,
-    });
-    logger.info(`VLM cycle: ${target.name} (batch) — recognized ${result.messages?.length || 0} messages`);
+    // Deduplicate messages locally as fallback (in case VLM missed it)
+    const dedupedMessages = this.deduplicateMessages(allMessages);
+    logger.info(`VLM cycle: ${target.name} — total ${allMessages.length} messages, ${dedupedMessages.length} after dedup`);
 
-    // Override roomName with config target name
-    result.roomName = target.name;
-    // Pass referenceTime for timestamp inheritance
-    result.referenceTime = referenceTime;
+    // Create result object
+    const result: RecognizedMessage = {
+      roomName: target.name,
+      messages: dedupedMessages,
+      referenceTime: latestTime !== '未知' ? latestTime : undefined,
+    };
 
-    // Process messages (dedup + save + webhook)
+    // Process messages (save + webhook)
     const monitor = getMonitor();
     await monitor.processMessages(result);
     this.targetsProcessedCount++;
 
-    // Update checkpoint with screenshot's timestamp (from OCR), not VLM's time
-    // The screenshot filename already has the correct date from OCR
-    // Skip screenshots with no timestamp (00000000_0000)
+    // Update checkpoint with screenshot's timestamp (from OCR)
     const validScreenshots = batch.filter(s => s.checkpointTime !== '00000000_0000');
     if (validScreenshots.length > 0) {
-      // Use the newest screenshot's checkpoint time
       const newestScreenshot = validScreenshots[validScreenshots.length - 1];
-      const checkpointTime = newestScreenshot.checkpointTime; // Format: YYYYMMDD_HHmm
-      // Convert "20260211_2143" to "2/11 21:43" for parsing
+      const checkpointTime = newestScreenshot.checkpointTime;
       const parsed = checkpointTime.match(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
       if (parsed) {
         const timeStr = `${parseInt(parsed[2])}/${parseInt(parsed[3])} ${parsed[4]}:${parsed[5]}`;
@@ -280,6 +310,34 @@ export class VlmCycle {
     if (config.vlm.cleanupProcessed) {
       this.cleanupFiles(batch.map(s => s.filepath));
     }
+  }
+
+  /**
+   * Deduplicate messages based on sender, content, and time similarity
+   */
+  private deduplicateMessages(messages: Message[]): Message[] {
+    if (messages.length === 0) return [];
+
+    const seen = new Map<string, Message>();
+    const result: Message[] = [];
+
+    for (const msg of messages) {
+      // Create a key from sender + content (normalized)
+      const contentNorm = msg.content.replace(/\s+/g, '').toLowerCase();
+      const key = `${msg.sender || ''}:${msg.time || ''}:${contentNorm}`;
+
+      if (!seen.has(key)) {
+        seen.set(key, msg);
+        result.push(msg);
+      } else {
+        // Keep the one with more complete info
+        const existing = seen.get(key)!;
+        if (!existing.sender && msg.sender) existing.sender = msg.sender;
+        if (!existing.time && msg.time) existing.time = msg.time;
+      }
+    }
+
+    return result;
   }
 
   private cleanupFiles(files: string[]): void {
