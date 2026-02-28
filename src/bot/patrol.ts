@@ -737,10 +737,12 @@ export async function startPatrol(): Promise<void> {
           consecutiveNoNewMessages = 0;
         }
 
-        // Calculate backoff for NEXT run based on NEW counter value
+        // Calculate backoff for NEXT run: interval + (level * interval)
+        // level=0: 1x, level=1: 2x, level=2: 3x, level=3: 4x, then reset
         const backoffRounds = Math.min(consecutiveNoNewMessages, MAX_BACKOFF);
-        const backoffInterval = config.patrol.interval * (backoffRounds === 0 ? 1 : backoffRounds);
-        logger.info(`Backoff: next run will wait ${backoffRounds === 0 ? 1 : backoffRounds}x interval (${backoffInterval}ms)`);
+        const backoffMultiplier = backoffRounds + 1;
+        const backoffInterval = config.patrol.interval * backoffMultiplier;
+        logger.info(`Backoff: next run will wait ${backoffMultiplier}x interval (${backoffInterval}ms)`);
 
         // Schedule next with backoff
         patrolTimer = setTimeout(() => scheduleNext(), backoffInterval);
