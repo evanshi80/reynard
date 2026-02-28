@@ -215,11 +215,16 @@ export class VlmCycle {
           return; // stop processing this target; do NOT advance watermark
         }
 
-        // Advance start by (BATCH_SIZE - OVERLAP) after the first batch
+        // Advance start - ensure we always make progress
         if (start === 0) {
+          // First batch: advance to end
           start = end;
+        } else if (end >= screenshots.length) {
+          // Last batch (reached end): exit loop
+          break;
         } else {
-          start = end - OVERLAP;
+          // Subsequent batches: advance by BATCH_SIZE - OVERLAP
+          start = start + (BATCH_SIZE - OVERLAP);
         }
       }
 
