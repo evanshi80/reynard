@@ -732,14 +732,13 @@ export async function startPatrol(): Promise<void> {
         consecutiveNoNewMessages++;
         logger.info(`No new screenshots (patrol success), backoff level: ${consecutiveNoNewMessages}`);
 
-        // Reset after MAX_BACKOFF (1 -> 2 -> 3 -> reset)
-        if (consecutiveNoNewMessages >= MAX_BACKOFF) {
-          logger.info('Max backoff reached, resetting counter');
+        // Calculate backoff for NEXT run: interval + (level * interval)
+        // level=1: 2x=40s, level=2: 3x=60s, level=3: 4x=80s, then reset
+        if (consecutiveNoNewMessages > MAX_BACKOFF) {
+          logger.info('Max backoff reached, resetting counter after this run');
           consecutiveNoNewMessages = 0;
         }
 
-        // Calculate backoff for NEXT run: interval + (level * interval)
-        // level=0: 1x, level=1: 2x, level=2: 3x, level=3: 4x, then reset
         const backoffRounds = Math.min(consecutiveNoNewMessages, MAX_BACKOFF);
         const backoffMultiplier = backoffRounds + 1;
         const backoffInterval = config.patrol.interval * backoffMultiplier;
