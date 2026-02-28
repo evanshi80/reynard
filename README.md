@@ -11,6 +11,8 @@ Windows 微信监控工具，通过截图 + VLM（视觉大模型）非侵入式
 - **滚动断点截图** - 通过 OCR 识别时间戳，只截图新消息，跳过已读内容
 - **多 VLM 支持** - Ollama (本地)、OpenAI、Anthropic、Qwen (DashScope)
 - **增量监控** - 每次只处理新消息，节省 API 调用
+- **VLM 批量处理** - 多截图合并发送，支持 overlap 避免消息截断
+- **智能 Backoff** - 无新消息时自动退避，减少无效 API 调用
 - **Web UI** - 本地 Web 查看消息和系统状态
 - **Webhook** - 消息推送到外部系统 (n8n 等)
 
@@ -90,6 +92,27 @@ VISION_PROVIDER=openai
 VISION_API_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
 VISION_API_KEY=qwen-api-key
 VISION_MODEL=qwen3-vl-plus-2025-12-19
+```
+
+## Patrol 配置
+
+### 巡逻间隔
+
+```env
+PATROL_INTERVAL=20000  # 毫秒，默认 20 秒
+```
+
+### Backoff 机制
+
+当巡逻成功执行但没有新消息时，会自动应用退避策略：
+
+- 第 1 次无新消息 → 下次等待 40 秒
+- 第 2 次无新消息 → 下次等待 60 秒
+- 第 3 次无新消息 → 下次等待 80 秒 → 然后重置
+- 窗口未找到等失败不计入退避
+
+```env
+PATROL_MAX_ROUNDS=0  # 0 = 无限巡逻
 ```
 
 ## 项目结构
