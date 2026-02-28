@@ -58,8 +58,13 @@ async function main() {
     await startPatrol();
 
     // Start VLM analysis cycle (stitches patrol screenshots → VLM → DB)
+    // Skip if interval is 0 (disabled)
     const vlmCycle = getVlmCycle();
-    vlmCycle.start();
+    if (config.vlm.cycleInterval > 0) {
+      vlmCycle.start();
+    } else {
+      logger.info('VLM cycle disabled (interval = 0)');
+    }
 
     logger.info('======================================');
     logger.info('   Reynard Monitor started successfully');

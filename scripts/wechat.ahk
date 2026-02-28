@@ -99,11 +99,33 @@ else if (action = "scroll_up") {
     Sleep 200
     OutputJSON(true, "scroll_up", "Scrolled up one screen (PgUp)")
 }
+else if (action = "scroll_up_smooth") {
+    ; Smooth scroll up using multiple small wheel rotations
+    ; Each wheel "click" scrolls ~2-3 lines of text
+    clicks := A_Args.Length >= 2 ? Integer(A_Args[2]) : 3  ; default 3 clicks
+    loop clicks {
+        Send "{WheelUp}"
+        Sleep 30  ; small delay between clicks for smooth effect
+    }
+    Sleep 200
+    OutputJSON(true, "scroll_up_smooth", "Smooth scrolled up " clicks " clicks")
+}
 else if (action = "scroll_down") {
     ; Scroll down by one screen height
     Send "{WheelDown}"
     Sleep 200
     OutputJSON(true, "scroll_down", "Scrolled down one screen")
+}
+else if (action = "scroll_down_smooth") {
+    ; Smooth scroll down using multiple small wheel rotations
+    ; Each wheel "click" scrolls ~2-3 lines of text
+    clicks := A_Args.Length >= 2 ? Integer(A_Args[2]) : 3  ; default 3 clicks
+    loop clicks {
+        Send "{WheelDown}"
+        Sleep 30  ; small delay between clicks for smooth effect
+    }
+    Sleep 200
+    OutputJSON(true, "scroll_down_smooth", "Smooth scrolled down " clicks " clicks")
 }
 else if (action = "click_three_dots") {
     ; Click the three dots menu button at top right of chat window

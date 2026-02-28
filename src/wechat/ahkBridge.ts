@@ -114,6 +114,22 @@ export async function scrollUp(): Promise<AhkResult> {
   return executeAhk(['scroll_up']);
 }
 
+/**
+ * Smooth scroll up using multiple small wheel rotations
+ * @param clicks Number of wheel clicks (default 3, each ~2-3 lines of text)
+ */
+export async function scrollUpSmooth(clicks: number = 3): Promise<AhkResult> {
+  return executeAhk(['scroll_up_smooth', String(clicks)]);
+}
+
+/**
+ * Smooth scroll down using multiple small wheel rotations
+ * @param clicks Number of wheel clicks (default 3, each ~2-3 lines of text)
+ */
+export async function scrollDownSmooth(clicks: number = 3): Promise<AhkResult> {
+  return executeAhk(['scroll_down_smooth', String(clicks)]);
+}
+
 // ============================================================
 // Chat History Extraction Functions
 // ============================================================

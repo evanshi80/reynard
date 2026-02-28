@@ -23,6 +23,7 @@ export const CHECKPOINT_DIR = path.join(config.capture.screenshotDir, 'checkpoin
 export interface Checkpoint {
   timestamp: number;  // Unix timestamp when checkpoint was saved
   timeStr: string;    // Last recognized time string (e.g., "21:35" or "1/15 21:35")
+  epochMs: number;    // Absolute time in milliseconds for comparison
   year?: number;
   month?: number;
   day?: number;
@@ -156,9 +157,16 @@ export function createCheckpointFromTimeStr(timeStr: string, timestamp: number):
     }
   }
 
+  // Compute epochMs for comparison
+  const y = year ?? now.getFullYear();
+  const m = (month ?? (now.getMonth() + 1)) - 1;
+  const d = day ?? now.getDate();
+  const epochMs = new Date(y, m, d, hour, minute, 0, 0).getTime();
+
   return {
     timestamp,
     timeStr,
+    epochMs,
     year,
     month,
     day,
@@ -168,35 +176,50 @@ export function createCheckpointFromTimeStr(timeStr: string, timestamp: number):
 }
 
 /**
- * Compare two timestamps to determine which is newer
+ * Convert parsed timestamp into an absolute epoch time in ms.
+ * If date parts are missing, assume "today" but keep it consistent.
+ */
+function toEpochMs(parsed: { year?: number; month?: number; day?: number; hour: number; minute: number }): number {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;  // 1-12
+  const currentDay = now.getDate();
+
+  const y = parsed.year ?? currentYear;
+  const m = (parsed.month ?? currentMonth);  // keep as 1-12
+  const d = parsed.day ?? currentDay;
+
+  // Create date using local timezone (month is 0-based in JS Date)
+  const dt = new Date(y, m - 1, d, parsed.hour, parsed.minute, 0, 0);
+  const epoch = dt.getTime();
+
+  logger.info(`[toEpochMs] parsed=${JSON.stringify(parsed)} => y=${y}, m=${m}, d=${d} => epoch=${epoch} (now=${now.getTime()})`);
+
+  return epoch;
+}
+
+/**
+ * Create checkpoint from parsed timestamp result
+ */
+function createCheckpointFromParsed(timeStr: string, parsed: { year?: number; month?: number; day?: number; hour: number; minute: number }): Checkpoint {
+  return {
+    timestamp: Date.now(),
+    timeStr,
+    epochMs: toEpochMs(parsed),
+    year: parsed.year,
+    month: parsed.month,
+    day: parsed.day,
+    hour: parsed.hour,
+    minute: parsed.minute,
+  };
+}
+
+/**
+ * Compare two checkpoints by epochMs
  * Returns true if t1 is newer than t2
  */
 function isNewer(t1: Checkpoint, t2: Checkpoint): boolean {
-  // If t1 has no date, it's today → newer
-  if (t1.month === undefined && t1.year === undefined) {
-    if (t2.month === undefined && t2.year === undefined) {
-      // Both are today, compare by time
-      return t1.hour > t2.hour || (t1.hour === t2.hour && t1.minute > t2.minute);
-    }
-    // t2 has date (not today), t1 is today → t1 is newer
-    return true;
-  }
-
-  // If t2 has no date, t1 is not today → t2 is newer
-  if (t2.month === undefined && t2.year === undefined) {
-    return false;
-  }
-
-  // Both have dates, compare chronologically
-  const y1 = t1.year || new Date().getFullYear();
-  const y2 = t2.year || new Date().getFullYear();
-
-  if (y1 !== y2) return y1 > y2;
-  if (t1.month !== undefined && t2.month !== undefined && t1.month !== t2.month) return t1.month > t2.month;
-  if (t1.day !== undefined && t2.day !== undefined && t1.day !== t2.day) return t1.day > t2.day;
-
-  // Same date, compare by time
-  return t1.hour > t2.hour || (t1.hour === t2.hour && t1.minute > t2.minute);
+  return t1.epochMs > t2.epochMs;
 }
 
 /**
@@ -207,63 +230,21 @@ function findNewestTimestamp(
 ): { y: number; checkpoint: Checkpoint } | null {
   if (results.length === 0) return null;
 
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  const todayMonth = now.getMonth() + 1;
-  const todayDay = now.getDate();
+  let newest: { y: number; checkpoint: Checkpoint } | null = null;
 
-  let newestResult: typeof results[0] | null = null;
+  for (const r of results) {
+    if (!r.parsed) continue;
+    const cp = createCheckpointFromParsed(r.text, r.parsed);
 
-  for (const result of results) {
-    if (!result.parsed) continue;
-
-    const { month, day: d, year, hour, minute } = result.parsed;
-
-    if (newestResult === null) {
-      newestResult = result;
-    } else if (newestResult.parsed) {
-      // Use isNewer comparison
-      const t1: Checkpoint = {
-        timestamp: 0,
-        timeStr: result.text,
-        month,
-        day: d,
-        year,
-        hour,
-        minute,
-      };
-      const t2: Checkpoint = {
-        timestamp: 0,
-        timeStr: newestResult.text,
-        month: newestResult.parsed.month,
-        day: newestResult.parsed.day,
-        year: newestResult.parsed.year,
-        hour: newestResult.parsed.hour,
-        minute: newestResult.parsed.minute,
-      };
-
-      if (isNewer(t1, t2)) {
-        newestResult = result;
-      }
+    if (!newest || cp.epochMs > newest.checkpoint.epochMs) {
+      newest = { y: r.y, checkpoint: cp };
     }
   }
 
-  if (!newestResult || !newestResult.parsed) return null;
+  if (!newest) return null;
 
-  const { month, day: d, year, hour, minute } = newestResult.parsed;
-  logger.debug(`[findNewest] result: timeStr="${newestResult.text}", parsed: year=${year}, month=${month}, day=${d}, hour=${hour}, minute=${minute}`);
-  return {
-    y: newestResult.y,
-    checkpoint: {
-      timestamp: Date.now(),
-      timeStr: newestResult.text,
-      month,
-      day: d,
-      year,
-      hour,
-      minute,
-    },
-  };
+  logger.debug(`[findNewest] result: timeStr="${newest.checkpoint.timeStr}", epochMs=${newest.checkpoint.epochMs}`);
+  return newest;
 }
 
 /**
@@ -383,8 +364,8 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
       }
       await new Promise(r => setTimeout(r, 300));
 
-      // Import scroll functions
-      const { scrollToTop, scrollUp } = await import('../wechat/ahkBridge');
+      // Import scroll functions (use smooth scrolling for better message coverage)
+      const { scrollToTop, scrollUpSmooth } = await import('../wechat/ahkBridge');
 
       // Check window before scrolling
       const winBeforeScroll = windowFinder.findWeChatWindow();
@@ -493,15 +474,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
             if (lastCheckpoint) {
               const reachedCheckpoint = timestampResults.some(r => {
                 if (!r.parsed) return false;
-                const cp: Checkpoint = {
-                  timestamp: 0,
-                  timeStr: r.text,
-                  month: r.parsed.month,
-                  day: r.parsed.day,
-                  year: r.parsed.year,
-                  hour: r.parsed.hour,
-                  minute: r.parsed.minute,
-                };
+                const cp = createCheckpointFromParsed(r.text, r.parsed);
                 return !isNewer(cp, lastCheckpoint);
               });
               if (reachedCheckpoint) {
@@ -525,7 +498,9 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
           logger.warn(`WeChat window disappeared before scrollUp for ${target.name}`);
           break;
         }
-        await scrollUp();
+        // Use smooth scroll: 5 wheel clicks per scroll (~10-15 lines of text)
+        // This is a balance between coverage and speed
+        await scrollUpSmooth(5);
         await new Promise(r => setTimeout(r, 300));
       }
 
@@ -541,6 +516,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
         const fallbackCP: Checkpoint = {
           timestamp: Date.now(),
           timeStr: `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+          epochMs: now.getTime(),
           year: now.getFullYear(),
           month: now.getMonth() + 1,
           day: now.getDate(),
