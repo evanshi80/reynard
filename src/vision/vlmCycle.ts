@@ -234,54 +234,32 @@ export class VlmCycle {
     fs.writeFileSync(batchInfoPath, `Batch: ${batch.length} images\nEarliest: ${earliestTime}\nLatest: ${latestTime}\nFiles:\n${batch.map(s => s.filepath).join('\n')}`);
     logger.info(`VLM cycle: batch info saved to ${batchInfoPath}`);
 
-    // Process each image separately and collect all messages
-    const allMessages: Message[] = [];
-    let previousRefTime = previousBatchLastTimestamp ? getTimeStr(previousBatchLastTimestamp) : undefined;
+    // Read all image buffers from batch
+    const imageBuffers = batch.map(s => fs.readFileSync(s.filepath));
 
-    for (let i = 0; i < batch.length; i++) {
-      const screenshot = batch[i];
-      const buffer = fs.readFileSync(screenshot.filepath);
+    // Build batch context for time order and duplicate handling
+    const batchContext: RecognizeContext = {
+      targetName: target.name,
+      category: target.category,
+      referenceTime: previousBatchLastTimestamp ? getTimeStr(previousBatchLastTimestamp) : undefined,
+      batchInfo: {
+        imageCount: batch.length,
+        imageIndex: 0, // Not used for batch send
+        earliestTime,
+        latestTime,
+      },
+    };
 
-      // Determine reference time for this image
-      let referenceTime = previousRefTime;
-      if (screenshot.checkpointTime && screenshot.checkpointTime !== '00000000_0000') {
-        referenceTime = getTimeStr(screenshot.checkpointTime);
-      }
-
-      // Build batch context for time order and duplicate handling
-      const batchContext: RecognizeContext = {
-        targetName: target.name,
-        category: target.category,
-        referenceTime,
-        batchInfo: {
-          imageCount: batch.length,
-          imageIndex: i,
-          earliestTime,
-          latestTime,
-        },
-      };
-
-      // Send to VLM
-      const result = await this.provider.recognize(buffer, batchContext);
-      logger.info(`VLM cycle: ${target.name} (image ${i + 1}/${batch.length}) — recognized ${result.messages?.length || 0} messages`);
-
-      // Add messages to collection (VLM should handle dedup based on prompt)
-      if (result.messages) {
-        allMessages.push(...result.messages);
-      }
-
-      // Update reference time for next image
-      if (screenshot.checkpointTime && screenshot.checkpointTime !== '00000000_0000') {
-        previousRefTime = getTimeStr(screenshot.checkpointTime);
-      }
-    }
+    // Send all images to VLM in one call
+    const result = await this.provider.recognize(imageBuffers, batchContext);
+    logger.info(`VLM cycle: ${target.name} (${batch.length} images) — recognized ${result.messages?.length || 0} messages`);
 
     // Deduplicate messages locally as fallback (in case VLM missed it)
-    const dedupedMessages = this.deduplicateMessages(allMessages);
-    logger.info(`VLM cycle: ${target.name} — total ${allMessages.length} messages, ${dedupedMessages.length} after dedup`);
+    const dedupedMessages = this.deduplicateMessages(result.messages || []);
+    logger.info(`VLM cycle: ${target.name} — ${result.messages?.length || 0} messages, ${dedupedMessages.length} after dedup`);
 
     // Create result object
-    const result: RecognizedMessage = {
+    const finalResult: RecognizedMessage = {
       roomName: target.name,
       messages: dedupedMessages,
       referenceTime: latestTime !== '未知' ? latestTime : undefined,
@@ -289,7 +267,7 @@ export class VlmCycle {
 
     // Process messages (save + webhook)
     const monitor = getMonitor();
-    await monitor.processMessages(result);
+    await monitor.processMessages(finalResult);
     this.targetsProcessedCount++;
 
     // Update checkpoint with screenshot's timestamp (from OCR)

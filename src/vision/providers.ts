@@ -20,12 +20,12 @@ export interface RecognizeContext {
 
 export interface VisionProvider {
   /**
-   * Recognize text from image
-   * @param imageBuffer - PNG image buffer
+   * Recognize text from images
+   * @param imageBuffers - Array of PNG image buffers (sent in one API call)
    * @param context - Optional target context for better prompt
    * @returns Parsed message data
    */
-  recognize(imageBuffer: Buffer, context?: RecognizeContext): Promise<RecognizedMessage>;
+  recognize(imageBuffers: Buffer[], context?: RecognizeContext): Promise<RecognizedMessage>;
 
   /**
    * Check if provider is available
@@ -159,11 +159,11 @@ export class OllamaProvider implements VisionProvider {
     }
   }
 
-  async recognize(imageBuffer: Buffer, context?: RecognizeContext): Promise<RecognizedMessage> {
+  async recognize(imageBuffers: Buffer[], context?: RecognizeContext): Promise<RecognizedMessage> {
     const axios = require('axios');
     const { config } = require('../config');
 
-    const base64Image = imageBuffer.toString('base64');
+    const base64Images = imageBuffers.map(b => b.toString('base64'));
     const prompt = buildPrompt(context);
 
     let response;
@@ -176,7 +176,7 @@ export class OllamaProvider implements VisionProvider {
           {
             role: 'user',
             content: prompt,
-            images: [base64Image],
+            images: base64Images,
           },
         ],
         stream: false,
@@ -185,7 +185,9 @@ export class OllamaProvider implements VisionProvider {
       const text = response.data.message?.content || response.data.response || '';
       return parseVisionResponse(text, 'Ollama');
     } else {
-      // LLaVA and other models use /api/generate endpoint
+      // LLaVA and other models use /api/generate endpoint (single image only)
+      // For multiple images, send first image only as fallback
+      const base64Image = base64Images[0];
       response = await axios.post(`${this.baseUrl}/api/generate`, {
         model: this.model,
         prompt,
@@ -285,7 +287,7 @@ export class OpenAIProvider implements VisionProvider {
     }
   }
 
-  async recognize(imageBuffer: Buffer, context?: RecognizeContext): Promise<RecognizedMessage> {
+  async recognize(imageBuffers: Buffer[], context?: RecognizeContext): Promise<RecognizedMessage> {
     const { OpenAI } = require('openai');
     const { config } = require('../config');
 
@@ -295,20 +297,27 @@ export class OpenAIProvider implements VisionProvider {
     });
     const prompt = buildPrompt(context);
 
+    // Build content array with text and all images
+    const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+      { type: 'text', text: prompt },
+    ];
+
+    // Add all images
+    for (const imageBuffer of imageBuffers) {
+      content.push({
+        type: 'image_url',
+        image_url: {
+          url: `data:image/png;base64,${imageBuffer.toString('base64')}`,
+        },
+      });
+    }
+
     const response = await client.chat.completions.create({
       model: this.model,
       messages: [
         {
           role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:image/png;base64,${imageBuffer.toString('base64')}`,
-              },
-            },
-          ],
+          content,
         },
       ],
       max_tokens: config.vision.maxTokens,
@@ -350,10 +359,27 @@ export class AnthropicProvider implements VisionProvider {
     }
   }
 
-  async recognize(imageBuffer: Buffer, context?: RecognizeContext): Promise<RecognizedMessage> {
+  async recognize(imageBuffers: Buffer[], context?: RecognizeContext): Promise<RecognizedMessage> {
     const { config } = require('../config');
     const axios = require('axios');
     const prompt = buildPrompt(context);
+
+    // Build content array with all images first, then text
+    const content: Array<{ type: string; source?: { type: string; media_type: string; data: string }; text?: string }> = [];
+
+    // Add all images
+    for (const imageBuffer of imageBuffers) {
+      content.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/png',
+          data: imageBuffer.toString('base64'),
+        },
+      });
+    }
+    // Add text prompt
+    content.push({ type: 'text', text: prompt });
 
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
@@ -364,17 +390,7 @@ export class AnthropicProvider implements VisionProvider {
         messages: [
           {
             role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: 'image/png',
-                  data: imageBuffer.toString('base64'),
-                },
-              },
-              { type: 'text', text: prompt },
-            ],
+            content,
           },
         ],
       },
