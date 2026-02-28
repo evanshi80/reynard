@@ -160,13 +160,33 @@ scripts/
     - 历史斜杠: `M/d HH:mm` (如 `1/15 21:30`)
     - 历史中文: `M月d日 HH:mm` (如 `1月15日 21:30`)
     - 完整日期: `YYYY/M/d HH:mm` (如 `2025/1/15 21:30`)
-27. **比较逻辑**: 无日期 = 今天（最新）→ 有日期按年月日比较 → 同日按时间比较
+    - 昨天: `昨天 HH:mm`
+    - 星期: `周X HH:mm` / `星期X HH:mm`
+27. **比较逻辑**: 使用 epochMs 比较 - 先比较 minEpoch/maxEpoch 与 watermark
 28. **滚动策略**:
     - 滚到底部（最新消息）
     - 截图 + OCR 识别时间戳
-    - 找到旧 checkpoint 停止，否则继续向上滚动
-    - 最多滚动 10 次（安全限制）
+    - 找到旧 checkpoint 停止（当 minEpoch <= watermark），否则继续向上滚动
+    - 最多滚动 10 次（无CP）或 50 次（有CP）
 29. **AHK 滚动命令**: `scroll_home` (传递窗口坐标用于动态点击), `scroll_up`
+
+### VLM 批量处理
+
+30. **截图文件名格式**: `patrol_<name>_<runId>_<index>.png`
+    - runId: 巡逻批次ID（时间戳后6位），防止重启后覆盖
+    - index: 截图序号
+31. **RunId 作为幂等单元**: VLM 按 runId 处理，整批完成后更新 watermark
+32. **批量 overlap**: 同一次 run 内相邻批次重叠 1 张图，避免消息截断
+33. **去重**: VLM 端去重 + 本地去重（按内容 normalized 后比较）
+
+### Patrol Backoff 机制
+
+34. **触发条件**: 巡逻成功执行但没有新消息
+35. **指数退避**: 间隔 + (level × interval)
+    - level 1: 2× = 40秒 (interval=20s)
+    - level 2: 3× = 60秒
+    - level 3: 4× = 80秒 → 80秒后重置为 0
+36. **失败不计入**: 窗口未找到等失败情况用正常间隔重试，不计入 backoff
 
 ## Code Conventions
 
