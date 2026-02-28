@@ -726,10 +726,11 @@ export async function startPatrol(): Promise<void> {
         if (success) patrolRoundCount++;
         // Next interval is normal
         scheduleNext();
-      } else {
-        // Increment backoff counter AFTER checking
+      } else if (success) {
+        // Only increment backoff if patrol actually ran successfully
+        // (not if window not found or other failure)
         consecutiveNoNewMessages++;
-        logger.info(`No new screenshots, backoff level: ${consecutiveNoNewMessages}`);
+        logger.info(`No new screenshots (patrol success), backoff level: ${consecutiveNoNewMessages}`);
 
         // Reset after MAX_BACKOFF (1 -> 2 -> 3 -> reset)
         if (consecutiveNoNewMessages >= MAX_BACKOFF) {
@@ -746,6 +747,10 @@ export async function startPatrol(): Promise<void> {
 
         // Schedule next with backoff
         patrolTimer = setTimeout(() => scheduleNext(), backoffInterval);
+      } else {
+        // Patrol failed (e.g., window not found), retry with normal interval
+        logger.info('Patrol failed, retrying with normal interval');
+        scheduleNext();
       }
     }, config.patrol.interval);
   };
