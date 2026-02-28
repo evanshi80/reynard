@@ -705,14 +705,7 @@ export async function startPatrol(): Promise<void> {
       return;
     }
 
-    // Calculate backoff interval
-    let interval = config.patrol.interval;
-    if (consecutiveNoNewMessages > 0) {
-      const backoffRounds = Math.min(consecutiveNoNewMessages, MAX_BACKOFF);
-      interval = config.patrol.interval * backoffRounds;
-      logger.info(`Backoff: waiting ${backoffRounds}x interval (${interval}ms) due to no new messages`);
-    }
-
+    // Run patrol with normal interval first
     patrolTimer = setTimeout(async () => {
       if (!patrolRunning) return;
 
@@ -731,8 +724,10 @@ export async function startPatrol(): Promise<void> {
         }
         consecutiveNoNewMessages = 0;
         if (success) patrolRoundCount++;
+        // Next interval is normal
+        scheduleNext();
       } else {
-        // Increment backoff counter
+        // Increment backoff counter AFTER checking
         consecutiveNoNewMessages++;
         logger.info(`No new screenshots, backoff level: ${consecutiveNoNewMessages}`);
 
@@ -741,10 +736,16 @@ export async function startPatrol(): Promise<void> {
           logger.info('Max backoff reached, resetting counter');
           consecutiveNoNewMessages = 0;
         }
-      }
 
-      scheduleNext();
-    }, interval);
+        // Calculate backoff for NEXT run based on NEW counter value
+        const backoffRounds = Math.min(consecutiveNoNewMessages, MAX_BACKOFF);
+        const backoffInterval = config.patrol.interval * (backoffRounds === 0 ? 1 : backoffRounds);
+        logger.info(`Backoff: next run will wait ${backoffRounds === 0 ? 1 : backoffRounds}x interval (${backoffInterval}ms)`);
+
+        // Schedule next with backoff
+        patrolTimer = setTimeout(() => scheduleNext(), backoffInterval);
+      }
+    }, config.patrol.interval);
   };
   scheduleNext();
 }
