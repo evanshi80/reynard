@@ -171,6 +171,29 @@ reynard/
 
 测试 Webhook
 
+## OpenClaw Skill
+
+项目提供了 OpenClaw Skill，可以直接用自然语言查询微信消息：
+
+### 安装 Skill
+
+将 `skills/wechat-monitor` 目录复制到 OpenClaw 的 skills 目录（通常在用户目录下）。
+
+### 使用方法
+
+在 OpenClaw 中使用 Skill：
+```
+/wechat-monitor 查询采购群最近的订单信息
+/wechat-monitor 统计技术讨论组这周的活跃度
+/wechat-monitor 提取家庭群里关于旅游的消息
+```
+
+### 注意事项
+
+- 需确保 Reynard 服务运行在 `http://localhost:3000`
+- 实时聊天场景有延迟（需要等待 VLM 处理）
+- 不支持获取多媒体内容（图片、语音等）
+
 ## 分发部署
 
 ### 打包
