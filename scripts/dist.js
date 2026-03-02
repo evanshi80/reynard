@@ -7,7 +7,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 // Use fixed folder name to avoid locking issues
-const DIST = path.join(ROOT, 'reynard-v2.0.0');
+const DIST = path.join(ROOT, 'reynard-v1.0.0');
 const DATA_DIR = path.join(DIST, 'data');
 
 const INCLUDE_FILES = [

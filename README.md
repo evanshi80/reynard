@@ -9,7 +9,8 @@ Windows 微信监控工具，通过截图 + VLM（视觉大模型）非侵入式
 ## 核心特性
 
 - **滚动断点截图** - 通过 OCR 识别时间戳，只截图新消息，跳过已读内容
-- **多 VLM 支持** - Ollama (本地)、OpenAI、Anthropic、Qwen (DashScope)
+- **多 VLM 支持** - Ollama (本地)、OpenAI、Qwen (DashScope)
+- **图片/文件识别** - VLM 自动识别消息中的图片和文件，添加标记
 - **增量监控** - 每次只处理新消息，节省 API 调用
 - **VLM 批量处理** - 多截图合并发送，支持 overlap 避免消息截断
 - **智能 Backoff** - 无新消息时自动退避，减少无效 API 调用
@@ -169,6 +170,35 @@ reynard/
 ### `POST /api/webhook/test`
 
 测试 Webhook
+
+## 分发部署
+
+### 打包
+
+```bash
+npm run dist
+```
+
+### 输出
+
+- 位置: `reynard-v1.0.0/` (~266MB)
+- 包含: 编译后的 JS + node_modules + 配置文件
+
+### 移交到其他电脑
+
+```bash
+# 1. 复制整个 reynard-v1.0.0 文件夹
+# 2. 在新电脑安装依赖（自动重建 native modules）
+cd reynard-v1.0.0
+npm install
+
+# 3. 配置
+cp .env.example .env
+# 编辑 .env 设置 API Key 等
+
+# 4. 运行
+npm start
+```
 
 ## 许可证
 

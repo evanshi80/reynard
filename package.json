@@ -1,6 +1,6 @@
 {
   "name": "reynard",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "Windows WeChat monitor with vision-based message collection using local LLM (Ollama) or cloud APIs",
   "main": "dist/index.js",
   "scripts": {

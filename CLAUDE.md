@@ -16,11 +16,12 @@ Windows 微信监控工具，通过截图 + VLM（视觉大模型）非侵入式
 - **图片处理**: sharp
 - **OCR**: Tesseract.js (中文 `chi_sim`)
 - **UI 自动化**: AutoHotkey v2 (通过 `child_process.execFile` 调用)
-- **VLM 提供者**: Ollama / OpenAI / Anthropic / Qwen (DashScope) (可配置)
+- **VLM 提供者**: Ollama / OpenAI / Qwen (DashScope) (可配置)
 - **数据库**: better-sqlite3
 - **Web**: Express 5
 - **日志**: winston + daily-rotate-file
 - **开发**: tsx (运行), nodemon (热重载)
+- **分发**: npm run dist 打包到 reynard-v{version}
 
 ## Commands
 
