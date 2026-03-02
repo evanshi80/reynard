@@ -10,7 +10,10 @@
     "dev:watch": "nodemon --exec tsx src/index.ts",
     "clean": "rimraf dist",
     "prebuild": "npm run clean",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "dist": "npm run build && npm run dist:copy",
+    "dist:copy": "node scripts/dist.js",
+    "postinstall": "node scripts/rebuild-native.js"
   },
   "keywords": [
     "wechat",
