@@ -51,6 +51,8 @@ export const config: Config = {
     maxTokens: getEnvNumber('VISION_MAX_TOKENS', 1000),
     // 消息提取模式: 'vlm' = VLM截图识别, 'text' = 聊天记录文本+OCR
     extractMode: getEnv('EXTRACT_MODE', 'vlm') as 'vlm' | 'text',
+    // V2 模式：启用 type/bounds 和附件处理
+    v2Enabled: getEnvBoolean('VISION_V2_ENABLED', false),
   },
   capture: {
     enabled: getEnvBoolean('CAPTURE_ENABLED', true),
@@ -129,3 +131,60 @@ function parseBotTargets(value: string): Array<{ name: string; category: string 
 ensureDir(path.dirname(config.database.path));
 ensureDir(config.capture.screenshotDir);
 ensureDir('logs');
+
+/**
+ * Update config at runtime
+ */
+export function updateConfig(updates: {
+  patrolInterval?: number;
+  patrolMaxRounds?: number;
+  targets?: Array<{ name: string; category: string }>;
+}): void {
+  if (updates.patrolInterval !== undefined) {
+    config.patrol.interval = updates.patrolInterval;
+  }
+  if (updates.patrolMaxRounds !== undefined) {
+    config.patrol.maxRounds = updates.patrolMaxRounds;
+  }
+  if (updates.targets !== undefined) {
+    config.bot.targets = updates.targets;
+  }
+}
+
+/**
+ * Save config to .env file for persistence
+ */
+export function saveConfigToEnv(): void {
+  const envPath = path.resolve(process.cwd(), '.env');
+  const lines: string[] = [];
+
+  // Read existing .env
+  let existing: Record<string, string> = {};
+  if (fs.existsSync(envPath)) {
+    const content = fs.readFileSync(envPath, 'utf-8');
+    content.split('\n').forEach(line => {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+        const [key, ...valueParts] = trimmed.split('=');
+        existing[key.trim()] = valueParts.join('=').trim();
+      }
+    });
+  }
+
+  // Update values
+  existing['PATROL_INTERVAL'] = String(config.patrol.interval);
+  existing['PATROL_MAX_ROUNDS'] = String(config.patrol.maxRounds);
+
+  // Format targets as "name|category,name|category"
+  const targetsStr = config.bot.targets
+    .map(t => `${t.name}|${t.category}`)
+    .join(',');
+  existing['BOT_TARGETS'] = targetsStr;
+
+  // Write back to .env
+  const newContent = Object.entries(existing)
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+
+  fs.writeFileSync(envPath, newContent + '\n', 'utf-8');
+}

@@ -193,6 +193,22 @@ else if (action = "copy_message") {
         OutputJSON(false, "copy_message", "Window coordinates required")
     }
 }
+else if (action = "save_attachment") {
+    ; Right-click on message to open context menu
+    msgX := A_Args.Length >= 2 ? Integer(A_Args[2]) : 0
+    msgY := A_Args.Length >= 3 ? Integer(A_Args[3]) : 0
+
+    if (msgX <= 0 or msgY <= 0) {
+        OutputJSON(false, "save_attachment", "Invalid coordinates")
+        ExitApp 1
+    }
+
+    ; Right-click to open context menu
+    Click msgX, msgY, "Right"
+    Sleep 200
+
+    OutputJSON(true, "save_attachment", "Right-clicked at " . msgX . "," . msgY)
+}
 else if (action = "read_clipboard") {
     ; Read clipboard content and output as JSON
     Sleep 200

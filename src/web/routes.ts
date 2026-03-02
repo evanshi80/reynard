@@ -1,11 +1,14 @@
 import { Router, Request, Response } from 'express';
-import { config } from '../config';
+import { config, updateConfig, saveConfigToEnv } from '../config';
 import { getMonitor } from '../capture/monitor';
 import { createVisionProvider } from '../vision/providers';
 import { getDatabase } from '../database/client';
 import { getRecentLogs } from '../utils/logger';
+import { getPatrolStatus, startPatrol, stopPatrol } from '../bot';
 import * as wechat from '../wechat';
+import { withAhkLock } from '../wechat/ahkBridge';
 import path from 'path';
+import fs from 'fs';
 import logger from '../utils/logger';
 
 interface StatusResponse {
@@ -142,18 +145,55 @@ export function createRoutes(): Router {
   router.get('/api/messages', (req: Request, res: Response) => {
     try {
       const limit = parseInt(req.query.limit as string) || 100;
+      const since = req.query.since ? parseInt(req.query.since as string) : undefined;
+      const until = req.query.until ? parseInt(req.query.until as string) : undefined;
+      const room = req.query.room as string | undefined;
       const db = getDatabase();
 
-      const messages = db.prepare(`
-        SELECT * FROM messages
-        ORDER BY timestamp DESC, msg_index ASC
-        LIMIT ?
-      `).all(limit);
+      let query = 'SELECT * FROM messages';
+      const params: (string | number)[] = [];
+      const conditions: string[] = [];
+
+      if (since !== undefined) {
+        conditions.push('timestamp >= ?');
+        params.push(since);
+      }
+      if (until !== undefined) {
+        conditions.push('timestamp <= ?');
+        params.push(until);
+      }
+      if (room) {
+        conditions.push('room_name = ?');
+        params.push(room);
+      }
+
+      if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+      }
+
+      query += ' ORDER BY timestamp DESC, msg_index ASC LIMIT ?';
+      params.push(limit);
+
+      const messages = db.prepare(query).all(...params);
 
       res.json({ messages });
     } catch (error) {
       logger.error('Failed to get messages:', error);
       res.status(500).json({ error: 'Failed to get messages' });
+    }
+  });
+
+  // API: Get all room names
+  router.get('/api/messages/rooms', (req: Request, res: Response) => {
+    try {
+      const db = getDatabase();
+      const rooms = db.prepare(`
+        SELECT DISTINCT room_name FROM messages ORDER BY room_name
+      `).all() as Array<{ room_name: string }>;
+      res.json({ rooms: rooms.map(r => r.room_name) });
+    } catch (error) {
+      logger.error('Failed to get rooms:', error);
+      res.status(500).json({ error: 'Failed to get rooms' });
     }
   });
 
@@ -184,7 +224,9 @@ export function createRoutes(): Router {
   // API: WeChat - Send message to a contact/group
   router.post('/api/wechat/send', async (req: Request, res: Response) => {
     try {
-      const { contact, message } = req.body;
+      const { contact, message, category } = req.body;
+      logger.info(`[wechat/send] contact="${contact}", category="${category || '未指定(默认联系人)'}"`);
+
       if (!contact || !message) {
         return res.status(400).json({ error: 'Both "contact" and "message" are required' });
       }
@@ -195,9 +237,12 @@ export function createRoutes(): Router {
         });
       }
 
-      const success = await wechat.sendToContact(contact, message);
+      // Use lock to prevent conflict with patrol
+      const success = await withAhkLock(async () => {
+        return await wechat.sendToContact(contact, message, category || '联系人');
+      });
       if (success) {
-        res.json({ success: true, contact, message });
+        res.json({ success: true, contact, message, category: category || '联系人' });
       } else {
         res.status(500).json({ error: 'Failed to send message via WeChat' });
       }
@@ -210,7 +255,9 @@ export function createRoutes(): Router {
   // API: WeChat - Open a chat window
   router.post('/api/wechat/open', async (req: Request, res: Response) => {
     try {
-      const { contact } = req.body;
+      const { contact, category } = req.body;
+      logger.info(`[wechat/open] contact="${contact}", category="${category || '未指定(默认联系人)'}"`);
+
       if (!contact) {
         return res.status(400).json({ error: '"contact" is required' });
       }
@@ -221,9 +268,12 @@ export function createRoutes(): Router {
         });
       }
 
-      const success = await wechat.openChat(contact);
+      // Use lock to prevent conflict with patrol
+      const success = await withAhkLock(async () => {
+        return await wechat.openChat(contact, category || '联系人');
+      });
       if (success) {
-        res.json({ success: true, contact });
+        res.json({ success: true, contact, category: category || '联系人' });
       } else {
         res.status(500).json({ error: 'Failed to open chat' });
       }
@@ -242,7 +292,10 @@ export function createRoutes(): Router {
         });
       }
 
-      const success = await wechat.activateWeChat();
+      // Use lock to prevent conflict with patrol
+      const success = await withAhkLock(async () => {
+        return await wechat.activateWeChat();
+      });
       if (success) {
         res.json({ success: true });
       } else {
@@ -280,6 +333,188 @@ export function createRoutes(): Router {
       timestamp: Date.now(),
       uptime: process.uptime(),
     });
+  });
+
+  // API: Get skill definition (for OpenClaw integration)
+  router.get('/api/skills/definition', (req: Request, res: Response) => {
+    try {
+      const status = getPatrolStatus();
+      res.json({
+        name: 'wechat-monitor',
+        description: '查询和分析微信群聊消息',
+        version: '1.0.0',
+        endpoints: {
+          messages: {
+            rooms: '/api/messages/rooms',
+            messages: '/api/messages',
+            count: '/api/messages/count',
+          },
+          patrol: {
+            status: '/api/patrol/status',
+            start: '/api/patrol/start',
+            stop: '/api/patrol/stop',
+            config: '/api/patrol/config',
+          },
+          wechat: {
+            send: '/api/wechat/send',
+            open: '/api/wechat/open',
+            activate: '/api/wechat/activate',
+          },
+        },
+        currentStatus: {
+          patrol: {
+            running: status.running,
+            roundCount: status.roundCount,
+            backoffLevel: status.backoffLevel,
+            currentInterval: status.currentInterval,
+            targets: status.targets,
+            lastMessageTime: status.lastMessageTime,
+          },
+        },
+        // Query parameter schemas
+        schemas: {
+          messages: {
+            since: 'number (Unix ms)',
+            until: 'number (Unix ms)',
+            room: 'string',
+            limit: 'number (default 100)',
+          },
+          patrolConfig: {
+            patrolInterval: 'number (ms, min 1000)',
+            patrolMaxRounds: 'number (0 = unlimited)',
+            targets: 'array of {name, category}',
+          },
+        },
+      });
+    } catch (error) {
+      logger.error('Failed to get skill definition:', error);
+      res.status(500).json({ error: 'Failed to get skill definition' });
+    }
+  });
+
+  // API: Get latest skill files (for OpenClaw to download and update)
+  router.get('/api/skills/latest', (req: Request, res: Response) => {
+    try {
+      // Get base URL from request host
+      const host = req.get('host') || 'localhost:3000';
+      const protocol = req.protocol;
+      const baseUrl = `${protocol}://${host}`;
+
+      // Read SKILL.md
+      const skillPath = path.join(process.cwd(), 'skills', 'wechat-monitor', 'SKILL.md');
+      const skillContent = fs.existsSync(skillPath)
+        ? fs.readFileSync(skillPath, 'utf-8')
+        : '';
+
+      // Generate config.json with dynamic baseUrl
+      const configContent = JSON.stringify({
+        name: 'wechat-monitor',
+        description: '查询和分析微信群聊消息',
+        version: '1.0.0',
+        api: {
+          baseUrl,
+          endpoints: {
+            definition: '/api/skills/definition',
+            latest: '/api/skills/latest',
+            rooms: '/api/messages/rooms',
+            messages: '/api/messages',
+            patrolStatus: '/api/patrol/status',
+            patrolStart: '/api/patrol/start',
+            patrolStop: '/api/patrol/stop',
+            patrolConfig: '/api/patrol/config',
+          },
+        },
+        config: {
+          defaultLimit: 100,
+          minPollInterval: 10000,
+        },
+      }, null, 2);
+
+      res.json({
+        skill: skillContent,
+        config: configContent,
+        baseUrl,
+      });
+    } catch (error) {
+      logger.error('Failed to get latest skill:', error);
+      res.status(500).json({ error: 'Failed to get latest skill' });
+    }
+  });
+
+  // API: Get patrol status
+  router.get('/api/patrol/status', (req: Request, res: Response) => {
+    try {
+      const status = getPatrolStatus();
+      res.json(status);
+    } catch (error) {
+      logger.error('Failed to get patrol status:', error);
+      res.status(500).json({ error: 'Failed to get patrol status' });
+    }
+  });
+
+  // API: Start patrol
+  router.post('/api/patrol/start', async (req: Request, res: Response) => {
+    try {
+      await startPatrol();
+      res.json({ success: true });
+    } catch (error) {
+      logger.error('Failed to start patrol:', error);
+      res.status(500).json({ error: 'Failed to start patrol' });
+    }
+  });
+
+  // API: Stop patrol
+  router.post('/api/patrol/stop', (req: Request, res: Response) => {
+    try {
+      stopPatrol();
+      res.json({ success: true });
+    } catch (error) {
+      logger.error('Failed to stop patrol:', error);
+      res.status(500).json({ error: 'Failed to stop patrol' });
+    }
+  });
+
+  // API: Update patrol config
+  router.post('/api/patrol/config', (req: Request, res: Response) => {
+    try {
+      const { patrolInterval, patrolMaxRounds, targets } = req.body;
+
+      const updates: {
+        patrolInterval?: number;
+        patrolMaxRounds?: number;
+        targets?: Array<{ name: string; category: string }>;
+      } = {};
+
+      if (patrolInterval !== undefined) {
+        if (typeof patrolInterval !== 'number' || patrolInterval < 1000) {
+          return res.status(400).json({ error: 'patrolInterval must be a number >= 1000' });
+        }
+        updates.patrolInterval = patrolInterval;
+      }
+
+      if (patrolMaxRounds !== undefined) {
+        if (typeof patrolMaxRounds !== 'number' || patrolMaxRounds < 0) {
+          return res.status(400).json({ error: 'patrolMaxRounds must be a number >= 0' });
+        }
+        updates.patrolMaxRounds = patrolMaxRounds;
+      }
+
+      if (targets !== undefined) {
+        if (!Array.isArray(targets)) {
+          return res.status(400).json({ error: 'targets must be an array' });
+        }
+        updates.targets = targets;
+      }
+
+      updateConfig(updates);
+      saveConfigToEnv(); // Save to .env for persistence
+      logger.info('Patrol config updated:', updates);
+
+      res.json({ success: true, config: getPatrolStatus() });
+    } catch (error) {
+      logger.error('Failed to update patrol config:', error);
+      res.status(500).json({ error: 'Failed to update patrol config' });
+    }
   });
 
   return router;

@@ -29,7 +29,17 @@
       "Bash(git init:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(__NEW_LINE_698582e4b18f5d01__)"
+      "Bash(__NEW_LINE_698582e4b18f5d01__)",
+      "Bash(gh repo create:*)",
+      "Bash(git push)",
+      "Bash(tasklist:*)",
+      "Bash(taskkill:*)",
+      "Bash(cmd /c \"cd /d C:\\\\Users\\\\lobst\\\\foxdenlab\\\\reynard && del /q data\\\\reynard.db data\\\\reynard.db-shm data\\\\reynard.db-wal data\\\\*.png data\\\\monitor.html 2>nul && del /q data\\\\screenshots\\\\patrol\\\\*.png 2>nul && del /q data\\\\screenshots\\\\checkpoints\\\\*.json 2>nul && echo Done\")",
+      "Bash(wmic process:*)",
+      "Bash(cmd //c:*)",
+      "Bash(echo:*)",
+      "WebFetch(domain:minimax-algeng-chat-tts.oss-cn-wulanchabu.aliyuncs.com)",
+      "Bash(ls:*)"
     ]
   }
 }

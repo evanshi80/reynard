@@ -1,5 +1,8 @@
 import { RecognizedMessage } from '../types';
 
+/** Prompt mode: V1 = basic, V2 = with type/bounds for attachments */
+export type PromptMode = 'v1' | 'v2';
+
 /**
  * LLM Vision Provider Interface
  * Implement this interface to add new providers
@@ -15,6 +18,8 @@ export interface RecognizeContext {
     earliestTime?: string; // Earliest timestamp in batch
     latestTime?: string;   // Latest timestamp in batch
   };
+  /** Prompt mode: V1 = basic, V2 = with type/bounds */
+  promptMode?: PromptMode;
 }
 
 export interface VisionProvider {
@@ -59,12 +64,14 @@ export function createVisionProvider(): VisionProvider {
 
 /**
  * Build extraction prompt for single image, with batch context for time order and duplicate handling.
+ * @param context - Recognition context with optional promptMode ('v1' | 'v2')
  */
 function buildPrompt(context?: RecognizeContext): string {
   const now = new Date();
   const today = `${now.getMonth() + 1}/${now.getDate()}`;
   const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
   const weekday = weekdays[now.getDay()];
+  const mode = context?.promptMode || 'v1';
 
   let header = '分析这张微信聊天截图，提取所有消息内容。\n';
 
@@ -92,7 +99,7 @@ function buildPrompt(context?: RecognizeContext): string {
     }
   }
 
-  return `${header}
+  const baseRules = `
 重要规则：
 1. 今天日期是 ${today}，星期是 ${weekday}
 2. **微信时间戳是聚合UI**：在聊天界面中，时间戳显示在消息组的顶部。例如"14:27"这条时间下面可能有5条消息，这5条消息都使用同一个时间"14:27"。不要把时间戳行当作消息返回！
@@ -115,15 +122,56 @@ function buildPrompt(context?: RecognizeContext): string {
    - 群聊：每条消息上方有发送者昵称，准确识别昵称
    - 私聊：消息分左右两侧，左侧=对方（sender="${context?.targetName || '对方'}"), 右侧="我"（sender="我"）
 6. **处理重复消息**：批量图片之间可能有重叠区域（同一条消息出现在上一张底部和下一张顶部）。如果发现完全相同或几乎相同的内容（sender相同、content相同），只保留第一批出现的！
+`;
+
+  if (mode === 'v2') {
+    // V2: Add type and bounds for attachments
+    return `${header}${baseRules}
+7. **识别消息类型**：每条消息必须判断 type：
+   - text: 纯文字消息
+   - image: 纯图片（气泡内是图片，没有文字描述）
+   - file: 文件消息（气泡内有文件图标或文件名）
+   - mixed: 混合（文字+图片/文件，如"看这张图【图片】"）
+8. **识别消息位置 bounds**：为每条消息提供在截图中的像素位置 {x, y, w, h}：
+   - bounds 描述消息气泡的完整区域（包含发送者昵称、消息内容、时间戳等）
+   - x, y 是气泡左上角坐标，w, h 是宽高
+   - 格式：{"x": 100, "y": 200, "w": 300, "h": 50}
+
+请以 JSON 格式返回，必须包含 roomName 和 messages：
+{
+  "roomName": "${context ? context.targetName : '聊天名称'}",
+  "messages": [
+    {"index": 0, "sender": "发送者昵称", "content": "消息内容", "time": "14:27", "type": "text", "bounds": {"x": 0, "y": 100, "w": 500, "h": 60}},
+    {"index": 1, "sender": "发送者昵称", "content": "", "time": "14:27", "type": "image", "bounds": {"x": 0, "y": 170, "w": 400, "h": 300}},
+    {"index": 2, "sender": "发送者昵称", "content": "报表.xlsx", "time": "14:30", "type": "file", "bounds": {"x": 0, "y": 480, "w": 350, "h": 40}}
+  ]
+}
+
+注意：
+- type 必须是 text/image/file/mixed 之一
+- bounds 必须是 {x, y, w, h} 格式
+- **顶部没有可见时间戳的消息，time 必须填 null**！
+- 只返回 JSON，不要包裹在 code block 里。`;
+  }
+
+  // V1: Original format with attachment detection
+  return `${header}${baseRules}
+7. **识别图片和文件**：每条消息需要判断是否包含图片或文件，并按以下格式插入到content中：
+   - 图片：如果消息包含图片，在消息末尾添加【图片：描述】（描述可以是图片内容的简要描述，如果没有则写"图片"）
+     * 例如：文本内容【图片：截图显示了xxx】
+     * 例如：纯图片消息：【图片】
+   - 文件：如果消息包含文件（文件名、文件图标），在消息末尾添加【文件|文件名|大小】
+     * 例如：报表.xlsx【文件|报表.xlsx|2.5MB】
+     * 例如：请查收【文件|汇总.pdf|1.2MB】
 
 请以 JSON 格式返回，必须包含 roomName 和 messages：
 {
   "roomName": "${context ? context.targetName : '聊天名称'}",
   "messages": [
     {"index": 0, "sender": "发送者昵称", "content": "消息A", "time": "2月17日 13:23"},
-    {"index": 1, "sender": "发送者昵称", "content": "消息B", "time": "2月17日 13:23"},
-    {"index": 2, "sender": "发送者昵称", "content": "消息C", "time": "2月17日 14:27"},
-    {"index": 3, "sender": "发送者昵称", "content": "消息D", "time": "2月17日 14:27"}
+    {"index": 1, "sender": "发送者昵称", "content": "消息B【图片：截图显示了二维码】", "time": "2月17日 13:23"},
+    {"index": 2, "sender": "发送者昵称", "content": "报表.xlsx【文件|报表.xlsx|2.5MB】", "time": "2月17日 14:27"},
+    {"index": 3, "sender": "发送者昵称", "content": "【图片】", "time": "2月17日 14:27"}
   ]
 }
 
@@ -133,6 +181,7 @@ function buildPrompt(context?: RecognizeContext): string {
 - time 字段必须完全复制截图中的时间字符串，或者填 null
 - sender必须是准确的发送者昵称
 - **去重**：如果本张图片的顶部消息与上一张图片的底部消息相同，只保留第一批
+- 图片和文件的标记必须紧跟在消息内容后面，中间不要有空格
 - 只返回 JSON，不要包裹在 code block 里。`;
 }
 

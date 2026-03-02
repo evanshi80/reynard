@@ -5,7 +5,7 @@
  * Sends images separately with time order info and duplicate handling instructions.
  */
 import { config } from '../config';
-import { createVisionProvider, VisionProvider, RecognizeContext } from './providers';
+import { createVisionProvider, VisionProvider, RecognizeContext, PromptMode } from './providers';
 import { getMonitor } from '../capture/monitor';
 import { RecognizedMessage } from '../types';
 
@@ -234,6 +234,98 @@ export class VlmCycle {
     }
   }
 
+  /**
+   * Just call VLM and return raw result (without processing)
+   * Used by patrol to get bounds info for attachment saving
+   */
+  async recognizeSingleScreenshot(
+    imagePath: string,
+    targetName: string,
+    category: string
+  ): Promise<{ messages: any[] }> {
+    const imageBuffer = fs.readFileSync(imagePath);
+    const promptMode: PromptMode = 'v1';
+
+    const context: RecognizeContext = {
+      targetName,
+      category,
+      batchInfo: {
+        imageCount: 1,
+        imageIndex: 0,
+      },
+      promptMode,
+    };
+
+    // Call VLM
+    const result = await this.provider.recognize([imageBuffer], context);
+    logger.info(`[V2] Single screenshot recognized ${result.messages?.length || 0} messages`);
+
+    // Save debug result
+    const vlmDir = path.join(config.capture.screenshotDir, 'vlm');
+    if (!fs.existsSync(vlmDir)) {
+      fs.mkdirSync(vlmDir, { recursive: true });
+    }
+    const vlmResultPath = path.join(vlmDir, `vlm_${targetName}_${Date.now()}_single_result.json`);
+    fs.writeFileSync(vlmResultPath, JSON.stringify(result, null, 2));
+
+    return { messages: result.messages || [] };
+  }
+
+  /**
+   * Process a single screenshot immediately after capture
+   * Used by patrol for real-time VLM analysis and attachment download
+   * @param existingMessages - If provided, skip VLM call and use these messages directly
+   */
+  async processSingleScreenshot(
+    imagePath: string,
+    targetName: string,
+    category: string,
+    existingMessages?: any[]
+  ): Promise<{ messages: any[]; attachments: any[] }> {
+    // Extract runId from filename: patrol_<name>_<runId>_<suffix>.png
+    const filename = path.basename(imagePath);
+    const runMatch = filename.match(/patrol_.+_(\d{6})_/);
+    const runId = runMatch ? Number(runMatch[1]) : 0;
+
+    let result: any;
+
+    if (existingMessages) {
+      // Use existing messages (already fetched by recognizeSingleScreenshot)
+      result = { messages: existingMessages };
+    } else {
+      // Call VLM
+      const imageBuffer = fs.readFileSync(imagePath);
+      const promptMode: PromptMode = 'v1';
+
+      const context: RecognizeContext = {
+        targetName,
+        category,
+        batchInfo: {
+          imageCount: 1,
+          imageIndex: 0,
+        },
+        promptMode,
+      };
+
+      result = await this.provider.recognize([imageBuffer], context);
+      logger.info(`[V2] Single screenshot recognized ${result.messages?.length || 0} messages`);
+
+      // Save debug result
+      const vlmDir = path.join(config.capture.screenshotDir, 'vlm');
+      if (!fs.existsSync(vlmDir)) {
+        fs.mkdirSync(vlmDir, { recursive: true });
+      }
+      const vlmResultPath = path.join(vlmDir, `vlm_${targetName}_${Date.now()}_single_result.json`);
+      fs.writeFileSync(vlmResultPath, JSON.stringify(result, null, 2));
+    }
+
+    // V1 mode: return raw messages
+    return {
+      messages: result.messages || [],
+      attachments: [],
+    };
+  }
+
   private async processBatch(target: { name: string; category: string }, batch: ScreenshotInfo[]): Promise<void> {
     // Batch is ordered from old -> new (chronological)
     // Overlap batches may include duplicate coverage intentionally
@@ -254,6 +346,9 @@ export class VlmCycle {
     // Read all image buffers from batch
     const imageBuffers = batch.map(s => fs.readFileSync(s.filepath));
 
+    // Determine prompt mode (V1 or V2)
+    const promptMode: PromptMode = 'v1';
+
     // Build batch context - batch is ordered old -> new
     const batchContext: RecognizeContext = {
       targetName: target.name,
@@ -262,17 +357,23 @@ export class VlmCycle {
         imageCount: batch.length,
         imageIndex: 0,
       },
+      promptMode,
     };
 
     // Send all images to VLM in one call
     const result = await this.provider.recognize(imageBuffers, batchContext);
-    logger.info(`VLM cycle: ${target.name} (${batch.length} images) — recognized ${result.messages?.length || 0} messages`);
+    logger.info(`VLM cycle: ${target.name} (${batch.length} images, mode=${promptMode}) — recognized ${result.messages?.length || 0} messages`);
 
+    // Save VLM result for debugging
+    const vlmResultPath = path.join(vlmDir, `vlm_${target.name}_${Date.now()}_result.json`);
+    fs.writeFileSync(vlmResultPath, JSON.stringify(result, null, 2));
+    logger.debug(`VLM result saved to ${vlmResultPath}`);
+
+    // V1 mode: Original flow
     // Deduplicate messages locally as fallback (in case VLM missed it)
-    const dedupedMessages = this.deduplicateMessages(result.messages || []);
+    const dedupedMessages = VlmCycle.deduplicateMessages(result.messages || []);
     logger.info(`VLM cycle: ${target.name} — ${result.messages?.length || 0} messages, ${dedupedMessages.length} after dedup`);
 
-    // Create result object
     const finalResult: RecognizedMessage = {
       roomName: target.name,
       messages: dedupedMessages,
@@ -293,7 +394,13 @@ export class VlmCycle {
    * Deduplicate messages based on content similarity
    * Uses normalized content as primary key, ignores minor time differences
    */
-  private deduplicateMessages(messages: Message[]): Message[] {
+  // ========== Reusable utilities (also used by V2) ==========
+
+  /**
+   * Deduplicate messages based on content similarity
+   * Uses normalized content as primary key, ignores minor time differences
+   */
+  static deduplicateMessages(messages: Message[]): Message[] {
     if (messages.length === 0) return [];
 
     const seen = new Map<string, Message>();
@@ -320,16 +427,16 @@ export class VlmCycle {
     }
 
     // Fill in null timestamps by propagating the last known timestamp
-    const filledMessages = this.fillNullTimestamps(result);
+    const filledMessages = VlmCycle.fillNullTimestamps(result);
     // Normalize time tokens: unify "HH:mm" with "M/d HH:mm" or "M月d日 HH:mm"
-    return this.normalizeTimeTokens(filledMessages);
+    return VlmCycle.normalizeTimeTokens(filledMessages);
   }
 
   /**
    * Normalize time tokens: if same HH:mm appears with and without date prefix,
    * unify to the longer form (e.g., "2月17日 14:27" wins over "14:27").
    */
-  private normalizeTimeTokens(messages: Message[]): Message[] {
+  static normalizeTimeTokens(messages: Message[]): Message[] {
     // Build mapping: HH:mm -> longest time string seen for this HH:mm
     const timeMap = new Map<string, string>();
 
@@ -368,7 +475,12 @@ export class VlmCycle {
    * Pass 1: forward-fill from previous known time.
    * Pass 2: backward-fill leading nulls from the first known time below.
    */
-  private fillNullTimestamps(messages: Message[]): Message[] {
+  /**
+   * Fill null timestamps by propagating known timestamps.
+   * Pass 1: forward-fill from previous known time.
+   * Pass 2: backward-fill leading nulls from the first known time below.
+   */
+  static fillNullTimestamps(messages: Message[]): Message[] {
     // Pass 1: forward fill
     let lastKnownTime: string | null = null;
     for (const msg of messages) {

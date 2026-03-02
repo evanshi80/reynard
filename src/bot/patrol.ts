@@ -4,9 +4,11 @@
  */
 import { config } from '../config';
 import logger from '../utils/logger';
-import { activateWeChat, navigateToResult, typeSearch, withAhkLock, sendMessage } from '../wechat/ahkBridge';
+import { activateWeChat, navigateToResult, typeSearch, withAhkLock, sendMessage, saveAttachment } from '../wechat/ahkBridge';
 import { getCapturer } from '../capture/screenshot';
 import { recognizeTimestamps } from '../wechat/ocr';
+import { getDatabase } from '../database/client';
+import { getVlmCycle } from '../vision/vlmCycle';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -394,6 +396,8 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
       // Capture and check timestamps
       let screenshotIndex = 0;
       let newestCheckpoint: Checkpoint | null = null;
+      let hasNewMessages = false; // Track if there are new messages
+      let shouldStop = false; // Flag to stop further scrolling
 
       // Has CP: scroll until we reach it, but with hard limit to avoid infinite scroll
       // No CP (first patrol): max 10 scrolls
@@ -408,7 +412,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
       let consecutiveNoChangeScreenshots = 0;
       const NO_CHANGE_THRESHOLD = 3; // Stop after 3 identical screenshots
 
-      for (let scrollCount = 0; scrollCount < maxScrolls; scrollCount++) {
+      for (let scrollCount = 0; scrollCount < maxScrolls && !shouldStop; scrollCount++) {
         // Check window before each scroll operation
         const winInLoop = windowFinder.findWeChatWindow();
         if (!winInLoop) {
@@ -427,7 +431,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
           break;
         }
 
-        // OCR recognize timestamps
+        // OCR recognize timestamps FIRST to decide if we need VLM
         const pngBuffer = fs.readFileSync(filepath);
         const timestampResults = await recognizeTimestamps(pngBuffer, 0, 0);
 
@@ -441,7 +445,6 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
         }
 
         // Check for stuck state (screenshot content not changing after scroll)
-        // This indicates we've reached the top and can't scroll further
         if (recentScreenshots.length >= 2) {
           const last = recentScreenshots[recentScreenshots.length - 1];
           const prev = recentScreenshots[recentScreenshots.length - 2];
@@ -458,6 +461,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
         }
 
         // Handle timestamp detection for checkpoint
+        let screenshotHasNewMessages = false;
         if (timestampResults.length > 0) {
           logger.debug(`OCR results: ${timestampResults.map(r => `"${r.text}" at y=${r.y}`).join(', ')}`);
 
@@ -467,20 +471,16 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
             const dateStr = year ? `${year}/${month}/${day}` : (month ? `${month}/${day}` : 'today');
             logger.info(`Found timestamps: ${timestampResults.map(r => r.text).join(', ')} (newest: ${dateStr} ${newest.checkpoint.hour}:${String(newest.checkpoint.minute).padStart(2, '0')})`);
 
-            // Track the newest timestamp
             if (!newestCheckpoint) {
-              logger.debug(`[debug] Setting initial checkpoint: ${newest.checkpoint.timeStr}`);
               newestCheckpoint = newest.checkpoint;
             } else {
               const newer = isNewer(newest.checkpoint, newestCheckpoint);
-              logger.debug(`[debug] isNewer(${newest.checkpoint.timeStr}, ${newestCheckpoint.timeStr}) = ${newer}`);
               if (newer) {
                 newestCheckpoint = newest.checkpoint;
               }
             }
 
             // Check if we've reached/scrolled past the old checkpoint
-            // Compute screenshot min/max epoch to reason about watermark crossing.
             if (lastCheckpoint) {
               const epochs = timestampResults
                 .filter(r => r.parsed)
@@ -491,23 +491,23 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
                 const maxEpoch = Math.max(...epochs);
                 const watermarkEpoch = lastCheckpoint.epochMs;
 
-                // This screenshot contains at least one message at-or-older than watermark.
-                // That means we've reached/passed the old boundary; further scrolling up is unnecessary.
                 const reachedWatermark = minEpoch <= watermarkEpoch;
+                const thisHasNew = maxEpoch > watermarkEpoch;
+                if (thisHasNew) hasNewMessages = true;
+                screenshotHasNewMessages = thisHasNew;
 
-                // This screenshot contains any message newer than watermark.
-                // Indicates there are new messages to process in this round.
-                const hasNewMessages = maxEpoch > watermarkEpoch;
-
-                logger.debug(`[CP check] minEpoch=${minEpoch}, maxEpoch=${maxEpoch}, watermark=${watermarkEpoch}, reached=${reachedWatermark}, hasNew=${hasNewMessages}`);
+                logger.debug(`[CP check] minEpoch=${minEpoch}, maxEpoch=${maxEpoch}, watermark=${watermarkEpoch}, reached=${reachedWatermark}, hasNew=${thisHasNew}`);
 
                 if (reachedWatermark) {
-                  if (!hasNewMessages && scrollCount === 0) {
-                    // First screenshot already at/older than watermark => no new messages in this round.
-                    // Keep watermark unchanged (do NOT overwrite with "today" etc.).
+                  if (!thisHasNew && scrollCount === 0) {
+                    shouldStop = true;
                     newestCheckpoint = lastCheckpoint;
                     logger.info(`Already at or past checkpoint "${lastCheckpoint.timeStr}", no new messages to capture.`);
                   } else {
+                    if (!newestCheckpoint) {
+                      newestCheckpoint = lastCheckpoint;
+                    }
+                    shouldStop = true;
                     logger.info(`Reached checkpoint "${lastCheckpoint.timeStr}" after ${scrollCount} scrolls, done.`);
                   }
                   break;
@@ -515,8 +515,72 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
               }
             }
           }
-        } else {
-          logger.debug(`No timestamps found in screenshot ${screenshotIndex} (scroll ${scrollCount})`);
+        }
+
+        // Only call VLM if:
+        // 1. has new messages OR
+        // 2. no checkpoint yet (first patrol) OR
+        // 3. no timestamps found but this is the first screenshot (scrollCount=0, could have attachments like images)
+        const shouldCallVlm = config.vision.v2Enabled && !shouldStop && (
+          screenshotHasNewMessages ||
+          !lastCheckpoint ||
+          (timestampResults.length === 0 && scrollCount === 0)
+        );
+
+        if (shouldCallVlm) {
+          try {
+            // Step 1: Get VLM result with bounds
+            logger.info(`[patrol] Step 1: Calling VLM for screenshot ${screenshotIndex} (has new: ${screenshotHasNewMessages})...`);
+            const vlmResult = await getVlmCycle().recognizeSingleScreenshot(filepath, target.name, target.category);
+            logger.info(`[patrol] Step 1: VLM done, found ${vlmResult.messages.length} messages`);
+
+            // Step 2: Save attachments via AHK
+            logger.info(`[patrol] Step 2: Starting attachment save for ${screenshotIndex}...`);
+
+            for (const msg of vlmResult.messages) {
+              if (msg.type === 'image' || msg.type === 'file') {
+                if (msg.bounds) {
+                  // Use upper-left offset for image/file clicks (more reliable than center)
+                  // Small offset from top-left to avoid clicking on edge/border
+                  const offsetX = Math.min(40, Math.round(msg.bounds.w * 0.15));
+                  const offsetY = Math.min(40, Math.round(msg.bounds.h * 0.15));
+
+                  // Calculate absolute screen position
+                  // The screenshot is captured at win.x, win.y (full window)
+                  // bounds.x/y from VLM are relative to the screenshot (same coordinate system)
+                  // So: screen_coord = win_coord + bounds_coord
+                  const clickX = win.x + msg.bounds.x + offsetX;
+                  const clickY = win.y + msg.bounds.y + offsetY;
+
+                  logger.info(`[patrol] Saving attachment at (${clickX}, ${clickY}) win=(${win.x},${win.y}) bounds=${JSON.stringify(msg.bounds)} offset=(${offsetX},${offsetY})`);
+
+                  try {
+                    await activateWeChat();
+                    await new Promise(r => setTimeout(r, 200));
+
+                    const saveResult = await Promise.race([
+                      saveAttachment(clickX, clickY),
+                      new Promise((_, reject) => setTimeout(() => reject(new Error('AHK timeout')), 5000))
+                    ]);
+                    logger.info(`[patrol] Save attachment result: ${(saveResult as any).success}`);
+                  } catch (error) {
+                    logger.error(`[patrol] Save attachment failed:`, error);
+                  }
+                }
+              }
+            }
+            logger.info(`[patrol] Step 2: Attachment save complete for ${screenshotIndex}`);
+
+            // Step 3: Process messages (dedup, save to DB) - pass existing messages to avoid calling VLM again
+            logger.info(`[patrol] Step 3: Processing messages for ${screenshotIndex}...`);
+            await getVlmCycle().processSingleScreenshot(filepath, target.name, target.category, vlmResult.messages);
+
+            logger.debug(`[patrol] VLM processed ${vlmResult.messages.length} messages`);
+          } catch (error) {
+            logger.error(`[patrol] VLM failed for screenshot ${screenshotIndex}:`, error);
+          }
+        } else if (!screenshotHasNewMessages && lastCheckpoint) {
+          logger.info(`[patrol] No new messages in screenshot ${screenshotIndex}, skipping VLM`);
         }
 
         // Scroll up for next screenshot
@@ -763,6 +827,41 @@ export function stopPatrol(): void {
     patrolTimer = null;
   }
   logger.info('Patrol stopped');
+}
+
+/**
+ * Get current patrol status
+ */
+export function getPatrolStatus(): {
+  running: boolean;
+  roundCount: number;
+  consecutiveNoNewMessages: number;
+  backoffLevel: number;
+  currentInterval: number;
+  maxRounds: number;
+  targets: Array<{ name: string; category: string }>;
+  lastMessageTime: number | null;
+} {
+  // Get last message time from database
+  let lastMessageTime: number | null = null;
+  try {
+    const db = getDatabase();
+    const result = db.prepare('SELECT MAX(timestamp) as last_time FROM messages').get() as { last_time: number | null };
+    lastMessageTime = result.last_time;
+  } catch (e) {
+    // Database not available
+  }
+
+  return {
+    running: patrolRunning,
+    roundCount: patrolRoundCount,
+    consecutiveNoNewMessages,
+    backoffLevel: Math.min(consecutiveNoNewMessages, MAX_BACKOFF),
+    currentInterval: config.patrol.interval,
+    maxRounds: config.patrol.maxRounds,
+    targets: config.bot.targets || [],
+    lastMessageTime,
+  };
 }
 
 /**

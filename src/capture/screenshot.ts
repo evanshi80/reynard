@@ -12,6 +12,11 @@ interface WindowBounds {
 }
 
 /**
+ * Chat area rect relative to window client area
+ */
+export type ChatAreaRect = { x: number; y: number; w: number; h: number };
+
+/**
  * Screenshot capturer with auto-detected chat area
  */
 export class ScreenshotCapturer {
@@ -60,6 +65,33 @@ export class ScreenshotCapturer {
       logger.error('getWindowBounds error:', error);
       return null;
     }
+  }
+
+  /**
+   * Get the chat area rect (sidebar boundary and vertical range)
+   * These values are detected from screenshot and are in PHYSICAL coordinates
+   */
+  getChatAreaRect(): ChatAreaRect {
+    const x = this.lastDividerX || 0;
+    const y = (this.lastHeaderBottomY || 0) + 2;
+    // For w and h, we need window dimensions - they're not stored, so we return reasonable defaults
+    // The caller can use win.width/win.height from windowFinder if needed
+    return { x, y, w: 0, h: 0 };
+  }
+
+  /**
+   * Get DPI scale used for the last capture
+   */
+  getDpiScale(): number {
+    return this.windowFinder.getDpiScaleForLastWindow();
+  }
+
+  /**
+   * Get just the chat area start X offset (legacy method)
+   * @deprecated Use getChatAreaRect() instead
+   */
+  getChatAreaOffset(): number {
+    return this.lastDividerX || 0;
   }
 
   /**

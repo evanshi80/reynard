@@ -468,9 +468,10 @@ export async function recognizeTimestamps(
     fs.mkdirSync(debugDir, { recursive: true });
   }
 
-  // 1) Crop to center strip (timestamps are centered; bubbles are left/right)
-  const cropLeft = Math.floor(imgW * 0.25);
-  const cropWidth = Math.floor(imgW * 0.5);
+  // 1) Crop to right strip (timestamps are on the right side of chat messages)
+  // Use wider crop to capture timestamps on the right side
+  const cropLeft = Math.floor(imgW * 0.35);
+  const cropWidth = Math.floor(imgW * 0.55);
 
   const cropped = await sharp(imageBuffer)
     .extract({ left: cropLeft, top: 0, width: cropWidth, height: imgH })
@@ -670,6 +671,60 @@ export async function recognizeTimestamps(
   });
 
   return results;
+}
+
+/**
+ * Full-text OCR for V2 message segmentation
+ * Returns text blocks with positions across the entire image
+ */
+export async function recognizeFullText(
+  imagePath: string,
+): Promise<Array<{ text: string; x: number; y: number; w: number; h: number }>> {
+  const w = await getWorker();
+
+  try {
+    await w.setParameters({ tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT });
+    const result = await w.recognize(imagePath, {}, { blocks: true });
+    const blocks: Array<{ text: string; x: number; y: number; w: number; h: number }> = [];
+
+    // Extract lines from OCR result
+    const lines: Tesseract.Line[] = [];
+    if (result.data.blocks) {
+      for (const block of result.data.blocks) {
+        for (const para of block.paragraphs || []) {
+          for (const line of para.lines || []) {
+            lines.push(line);
+          }
+        }
+      }
+    }
+
+    // Process all lines with their bounding boxes
+    for (const line of lines) {
+      if (!line.text?.trim()) continue;
+
+      const bbox = line.bbox;
+      if (!bbox) continue;
+
+      // Filter out noise: very small or at the very top (likely UI elements)
+      if (bbox.y0 < 10 || (bbox.x1 - bbox.x0) < 5 || (bbox.y1 - bbox.y0) < 5) {
+        continue;
+      }
+
+      blocks.push({
+        text: line.text.trim(),
+        x: bbox.x0,
+        y: bbox.y0,
+        w: bbox.x1 - bbox.x0,
+        h: bbox.y1 - bbox.y0,
+      });
+    }
+
+    return blocks;
+  } catch (error) {
+    logger.error('[OCR] Full text recognition failed:', error);
+    return [];
+  }
 }
 
 /**

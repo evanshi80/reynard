@@ -58,9 +58,11 @@ async function main() {
     await startPatrol();
 
     // Start VLM analysis cycle (stitches patrol screenshots → VLM → DB)
-    // Skip if interval is 0 (disabled)
+    // Skip if interval is 0 (disabled) OR if V2 is enabled (patrol handles VLM inline)
     const vlmCycle = getVlmCycle();
-    if (config.vlm.cycleInterval > 0) {
+    if (config.vision.v2Enabled) {
+      logger.info('VLM cycle disabled (V2 mode - patrol handles VLM inline)');
+    } else if (config.vlm.cycleInterval > 0) {
       vlmCycle.start();
     } else {
       logger.info('VLM cycle disabled (interval = 0)');

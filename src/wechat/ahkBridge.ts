@@ -163,6 +163,20 @@ export async function readClipboard(): Promise<AhkResult> {
 }
 
 /**
+ * Save attachment by right-clicking on message position
+ * @param msgX - X coordinate within chat window
+ * @param msgY - Y coordinate within chat window
+ * @param savePath - Optional save path hint
+ */
+export async function saveAttachment(msgX: number, msgY: number, savePath?: string): Promise<AhkResult> {
+  const args = ['save_attachment', String(msgX), String(msgY)];
+  if (savePath) {
+    args.push(savePath);
+  }
+  return executeAhk(args);
+}
+
+/**
  * Scroll up in chat history
  */
 export async function scrollHistory(): Promise<AhkResult> {

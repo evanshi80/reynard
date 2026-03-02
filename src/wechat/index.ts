@@ -69,6 +69,7 @@ export async function openChat(contactName: string, category: string = '联系�
 
     logger.info(`Navigating to "${contactName}" via ${category}: Home + ${result.downCount} Down`);
     const ahkResult = await ahk.navigateToResult(contactName, result.downCount);
+    logger.info(`[openChat] navigateToResult success: ${ahkResult.success}`);
     return ahkResult.success;
   } catch (error) {
     logger.error(`Failed to open chat "${contactName}":`, error);
@@ -94,11 +95,49 @@ export async function sendMessage(message: string): Promise<boolean> {
  */
 export async function sendToContact(contact: string, message: string, category: string = '联系人'): Promise<boolean> {
   try {
+    logger.info(`[sendToContact] Opening chat: ${contact}, category: ${category}`);
     const opened = await openChat(contact, category);
+    logger.info(`[sendToContact] openChat result: ${opened}`);
+
     if (!opened) return false;
 
+    // Wait for chat to fully load
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // First activate WeChat to ensure it's in focus
+    await ahk.activateWeChat();
     await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Use Ctrl+End to move cursor to end of input area, then type
+    // This is more reliable than clicking
+    logger.info(`[sendToContact] Sending message: "${message}"`);
+
+    // Use ahk.sendMessage which handles clipboard and sending
     const result = await ahk.sendMessage(message);
+    logger.info(`[sendToContact] sendMessage result: ${result.success}`);
+
+    if (!result.success) {
+      // Try alternative: use typeSearch to focus the input
+      logger.info(`[sendToContact] Retrying with alternative method`);
+      await ahk.activateWeChat();
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Click at a safer position - near the bottom of the chat area but within reasonable bounds
+      const win = windowFinder.findWeChatWindow();
+      if (win) {
+        // Use smaller relative position to stay within screen
+        const safeX = win.x + Math.round(win.width * 0.5);
+        const safeY = win.y + Math.round(win.height * 0.9);
+        logger.info(`[sendToContact] Clicking at safe position (${safeX}, ${safeY})`);
+        await ahk.clickAt(safeX, safeY);
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+
+      const retryResult = await ahk.sendMessage(message);
+      logger.info(`[sendToContact] retry sendMessage result: ${retryResult.success}`);
+      return retryResult.success;
+    }
+
     return result.success;
   } catch (error) {
     logger.error(`Failed to send to "${contact}":`, error);

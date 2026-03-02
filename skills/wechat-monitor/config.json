@@ -1,0 +1,21 @@
+{
+  "name": "wechat-monitor",
+  "description": "查询和分析微信群聊消息",
+  "version": "1.0.0",
+  "api": {
+    "baseUrl": "http://localhost:3000",
+    "endpoints": {
+      "definition": "/api/skills/definition",
+      "rooms": "/api/messages/rooms",
+      "messages": "/api/messages",
+      "patrolStatus": "/api/patrol/status",
+      "patrolStart": "/api/patrol/start",
+      "patrolStop": "/api/patrol/stop",
+      "patrolConfig": "/api/patrol/config"
+    }
+  },
+  "config": {
+    "defaultLimit": 100,
+    "minPollInterval": 10000
+  }
+}

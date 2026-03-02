@@ -8,6 +8,8 @@ export interface Config {
     maxTokens: number;
     // 消息提取模式: 'vlm' = VLM截图识别, 'text' = 聊天记录文本+OCR
     extractMode: 'vlm' | 'text';
+    // V2 模式：启用 type/bounds 和附件处理
+    v2Enabled: boolean;
   };
   capture: {
     enabled: boolean;
@@ -122,4 +124,17 @@ export interface BotStatus {
   scanning: boolean;
   userName?: string;
   qrcodeUrl?: string;
+}
+
+export interface AttachmentRef {
+  type: 'image' | 'file';
+  hash: string;         // 文件 hash
+  ext: string;         // 扩展名
+  originalName?: string; // 原始文件名（仅 file 类型）
+}
+
+// 附件存储路径
+export function getAttachmentPath(roomName: string, hash: string, ext: string): string {
+  const safeName = roomName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
+  return `data/attachments/${safeName}/${hash}.${ext}`;
 }
