@@ -189,6 +189,39 @@ scripts/
     - level 3: 4× = 80秒 → 80秒后重置为 0
 36. **失败不计入**: 窗口未找到等失败情况用正常间隔重试，不计入 backoff
 
+### V2 OpenCV 消息分割 (推荐方案)
+
+V2 使用 OpenCV 进行消息块分割，比纯 VLM 更可控：
+
+37. **技术栈**: OpenCV4Nodejs-prebuilt + Tesseract OCR + 规则
+38. **消息分割算法**: 水平投影法
+    - 转灰度 → 高斯模糊 → Otsu二值化
+    - 计算每行黑色像素投影
+    - 找到空白行（<3%黑色）作为消息间隔
+    - 最小间隔高度 8 像素
+39. **边界精修**: 垂直投影找左右边界
+40. **类型检测**:
+    - **图片**: Canny边缘检测，边缘密度 > 6% = 图片
+    - **文件**: 寻找矩形轮廓（4边形近似）
+41. **模板匹配**: 用于精确定位附件图标点击位置
+    - 模板放在 `data/templates/` 目录
+    - 支持 image.png, file.png, voice.png, video.png
+42. **OCR**: 对文本块使用 Tesseract.js 识别内容
+
+```typescript
+// 典型流程
+const { blocks, image } = processScreenshot(screenshotPath);
+for (const block of blocks) {
+  if (block.type === 'text') {
+    const text = await ocr.recognize(block.crop);
+    // 入库
+  } else if (block.type === 'image') {
+    // 使用 AHK 右键保存图片
+    await ahk.saveAttachment(block);
+  }
+}
+```
+
 ## Code Conventions
 
 - TypeScript strict mode
