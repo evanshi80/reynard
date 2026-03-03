@@ -207,13 +207,16 @@ export function isImageRegion(img: cv.Mat): boolean {
 
 /**
  * Detect if a region is likely a file attachment based on icon patterns
- * WeChat file messages have a distinctive green icon with white "X" (Excel) or other shapes
+ * WeChat file messages have distinctive colored icons:
+ * - Excel: green icon with white "X"
+ * - PDF: red icon with "PDF" text
+ * - Word: blue icon
  */
 export function isFileRegion(img: cv.Mat): boolean {
-  // Method 1: Detect green color (WeChat file icon is forest green ~ RGB 34,139,34)
-  const hasGreenColor = detectGreenColor(img);
+  // Method 1: Detect file icon colors (green=Excel, red=PDF, blue=Word)
+  const fileColor = detectFileIconColor(img);
 
-  // Method 2: Look for rectangular contours
+  // Method 2: Look for rectangular contours (document shape)
   const gray = img.bgrToGray();
   const edges = gray.canny(50, 150);
   const contours = edges.findContours(cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
@@ -229,37 +232,52 @@ export function isFileRegion(img: cv.Mat): boolean {
   // File icons typically have 1-3 rectangular elements
   const hasRectangles = rectangularCount >= 1 && rectangularCount <= 3;
 
-  // Either green color OR rectangles could indicate a file
-  return hasGreenColor || hasRectangles;
+  // Either file color OR rectangles could indicate a file
+  return fileColor !== null || hasRectangles;
 }
 
 /**
- * Detect green color which is characteristic of WeChat file icons
- * WeChat uses forest green: RGB(34, 139, 34) or similar shades
+ * Detect file icon colors characteristic of WeChat file attachments
+ * Different file types have different colors:
+ * - Excel: green (hue 35-85)
+ * - PDF: red/orange (hue 0-30 or 150-180)
+ * - Word: blue (hue 90-130)
  */
-function detectGreenColor(img: cv.Mat): boolean {
-  // Convert to HSV for better color detection
+function detectFileIconColor(img: cv.Mat): 'excel' | 'pdf' | 'word' | null {
   const hsv = img.cvtColor(cv.COLOR_BGR2HSV);
 
-  // Green hue range in HSV (approximately 60° on color wheel)
-  // WeChat green is around hue 100-140
-  const lowerGreen = new cv.Vec3(35, 50, 50);
-  const upperGreen = new cv.Vec3(85, 255, 255);
+  // Check for each color type
+  const colors = [
+    { name: 'excel' as const, lower: new cv.Vec3(35, 50, 50), upper: new cv.Vec3(85, 255, 255) },
+    { name: 'red' as const, lower: new cv.Vec3(0, 50, 50), upper: new cv.Vec3(15, 255, 255) },
+    { name: 'red2' as const, lower: new cv.Vec3(160, 50, 50), upper: new cv.Vec3(180, 255, 255) },
+    { name: 'word' as const, lower: new cv.Vec3(90, 40, 40), upper: new cv.Vec3(130, 255, 255) },
+  ];
 
-  const mask = hsv.inRange(lowerGreen, upperGreen);
+  let bestMatch: 'excel' | 'pdf' | 'word' | null = null;
+  let bestRatio = 0;
 
-  // Count green pixels
-  const greenPixels = mask.countNonZero();
-  const totalPixels = img.rows * img.cols;
-  const greenRatio = greenPixels / totalPixels;
+  for (const color of colors) {
+    const mask = hsv.inRange(color.lower, color.upper);
+    const coloredPixels = mask.countNonZero();
+    const ratio = coloredPixels / (img.rows * img.cols);
+    mask.delete();
 
-  // If more than 1% of the region is green, likely a file icon
-  const result = greenRatio > 0.01;
+    if (ratio > 0.01 && ratio > bestRatio) {
+      bestRatio = ratio;
+      if (color.name === 'excel') bestMatch = 'excel';
+      else if (color.name === 'red' || color.name === 'red2') bestMatch = 'pdf';
+      else if (color.name === 'word') bestMatch = 'word';
+    }
+  }
 
   hsv.delete();
-  mask.delete();
+  return bestMatch;
+}
 
-  return result;
+// Keep alias for backward compatibility
+function detectGreenColor(img: cv.Mat): boolean {
+  return detectFileIconColor(img) !== null;
 }
 
 /**
