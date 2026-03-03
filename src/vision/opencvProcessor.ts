@@ -182,6 +182,7 @@ export function refineBlockBoundaries(img: cv.Mat, block: MessageBlock): Message
 
 /**
  * Detect if a region is likely an image based on edge density
+ * WeChat images have no special marker - they appear as photo thumbnails
  */
 export function isImageRegion(img: cv.Mat): boolean {
   // Apply Canny edge detection
@@ -194,23 +195,27 @@ export function isImageRegion(img: cv.Mat): boolean {
 
   // Image regions typically have higher edge density than text
   // Text has ~0.02-0.04, images have ~0.06+
+  // But images without markers have variable density, so we use a lower threshold
   logger.debug(`[OpenCV] Edge density: ${edgeDensity.toFixed(4)}`);
 
-  return edgeDensity > 0.06;
+  // Additional check: images usually have reasonable size
+  const areaRatio = totalPixels / (1920 * 1080); // relative to 1080p
+
+  // Image if: edge density > 4% AND region is reasonably large (> 0.5% of 1080p screen)
+  return edgeDensity > 0.04 && areaRatio > 0.005;
 }
 
 /**
  * Detect if a region is likely a file attachment based on icon patterns
+ * WeChat file messages have a distinctive green icon with white "X" (Excel) or other shapes
  */
 export function isFileRegion(img: cv.Mat): boolean {
-  // Look for common file icon characteristics:
-  // 1. Rectangular shape with consistent aspect ratio
-  // 2. Often has a "corner fold" triangle in top-right
+  // Method 1: Detect green color (WeChat file icon is forest green ~ RGB 34,139,34)
+  const hasGreenColor = detectGreenColor(img);
 
+  // Method 2: Look for rectangular contours
   const gray = img.bgrToGray();
   const edges = gray.canny(50, 150);
-
-  // Count rectangular contours
   const contours = edges.findContours(cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
   let rectangularCount = 0;
@@ -222,7 +227,39 @@ export function isFileRegion(img: cv.Mat): boolean {
   }
 
   // File icons typically have 1-3 rectangular elements
-  return rectangularCount >= 1 && rectangularCount <= 3;
+  const hasRectangles = rectangularCount >= 1 && rectangularCount <= 3;
+
+  // Either green color OR rectangles could indicate a file
+  return hasGreenColor || hasRectangles;
+}
+
+/**
+ * Detect green color which is characteristic of WeChat file icons
+ * WeChat uses forest green: RGB(34, 139, 34) or similar shades
+ */
+function detectGreenColor(img: cv.Mat): boolean {
+  // Convert to HSV for better color detection
+  const hsv = img.cvtColor(cv.COLOR_BGR2HSV);
+
+  // Green hue range in HSV (approximately 60° on color wheel)
+  // WeChat green is around hue 100-140
+  const lowerGreen = new cv.Vec3(35, 50, 50);
+  const upperGreen = new cv.Vec3(85, 255, 255);
+
+  const mask = hsv.inRange(lowerGreen, upperGreen);
+
+  // Count green pixels
+  const greenPixels = mask.countNonZero();
+  const totalPixels = img.rows * img.cols;
+  const greenRatio = greenPixels / totalPixels;
+
+  // If more than 1% of the region is green, likely a file icon
+  const result = greenRatio > 0.01;
+
+  hsv.delete();
+  mask.delete();
+
+  return result;
 }
 
 /**
