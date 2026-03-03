@@ -292,70 +292,114 @@ export type FileType = 'excel' | 'pdf' | 'word' | 'ppt' | 'zip' | 'txt';
 /**
  * Detect video messages in WeChat
  * Videos typically have:
- * - Rectangular thumbnail (16:9 or 4:3 aspect ratio)
- * - Play button (triangle or circle)
- * - Duration text in corner
+ * - Rectangular thumbnail (various aspect ratios)
+ * - Play button in CENTER (triangle ▶)
+ * - Duration text in corner (optional)
  */
 export function isVideoRegion(img: cv.Mat): boolean {
-  const rows = img.rows;
-  const cols = img.cols;
-  const ratio = cols / rows;
+  // Look for play button in CENTER (most reliable indicator)
+  const hasCenterPlayButton = detectCenterPlayButton(img);
 
-  // Check aspect ratio (videos are usually 16:9 or 4:3)
-  const hasVideoRatio = ratio > 1.2 && ratio < 2.2;
+  // Also check for duration text in bottom-right corner (optional but common)
+  const hasDuration = detectDurationText(img);
 
-  // Look for play button shape (triangle or circle)
-  const hasPlayButton = detectPlayButton(img);
-
-  // Check for duration text area (usually in bottom-right corner)
-  const hasDurationArea = detectDurationArea(img);
-
-  // Video if: has video ratio AND (play button OR duration)
-  return hasVideoRatio && (hasPlayButton || hasDurationArea);
+  // Video if: has center play button OR (center circle AND duration)
+  return hasCenterPlayButton || (detectCenterCircle(img) && hasDuration);
 }
 
 /**
- * Detect play button shape (triangle ▶ or circle)
+ * Detect play button in CENTER of thumbnail (triangle ▶)
  */
-function detectPlayButton(img: cv.Mat): boolean {
-  // Convert to gray and find edges
-  const gray = img.bgrToGray();
-  const edges = gray.canny(50, 150);
+function detectCenterPlayButton(img: cv.Mat): boolean {
+  const rows = img.rows;
+  const cols = img.cols;
 
-  // Find contours
+  // Define center region (middle 50% of image)
+  const centerX = Math.floor(cols * 0.25);
+  const centerY = Math.floor(rows * 0.25);
+  const centerW = Math.floor(cols * 0.5);
+  const centerH = Math.floor(rows * 0.5);
+
+  const center = img.getRegion(new cv.Rect(centerX, centerY, centerW, centerH));
+
+  // Look for triangular shape in center
+  const gray = center.bgrToGray();
+  const edges = gray.canny(50, 150);
   const contours = edges.findContours(cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
+  let hasTriangle = false;
   for (const contour of contours) {
     const approx = contour.approxPolyDP(0.04 * contour.arcLength());
-    // Triangle has 3 points, circle has many but small area
-    if (approx.length === 3 || (approx.length > 8 && contour.area() < 1000)) {
-      return true;
+    // Triangle has 3 vertices
+    if (approx.length === 3 && contour.area() > 50 && contour.area() < centerW * centerH * 0.3) {
+      hasTriangle = true;
+      break;
     }
   }
 
-  return false;
+  center.delete();
+  return hasTriangle;
 }
 
 /**
- * Detect duration text area (usually bottom-right corner)
+ * Detect circular play button in center
  */
-function detectDurationArea(img: cv.Mat): boolean {
-  // Check bottom-right region for text-like patterns
+function detectCenterCircle(img: cv.Mat): boolean {
   const rows = img.rows;
   const cols = img.cols;
+
+  // Center region
+  const centerX = Math.floor(cols * 0.3);
+  const centerY = Math.floor(rows * 0.3);
+  const centerW = Math.floor(cols * 0.4);
+  const centerH = Math.floor(rows * 0.4);
+
+  const center = img.getRegion(new cv.Rect(centerX, centerY, centerW, centerH));
+
+  const gray = center.bgrToGray();
+  const edges = gray.canny(50, 150);
+  const contours = edges.findContours(cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  let hasCircle = false;
+  for (const contour of contours) {
+    const approx = contour.approxPolyDP(0.02 * contour.arcLength());
+    // Circle has many points and is roughly square-ish
+    if (approx.length > 8 && contour.area() > 100 && contour.area() < centerW * centerH * 0.4) {
+      // Check circularity
+      const perimeter = contour.arcLength();
+      const circularity = (4 * Math.PI * contour.area()) / (perimeter * perimeter);
+      if (circularity > 0.5) {
+        hasCircle = true;
+        break;
+      }
+    }
+  }
+
+  center.delete();
+  return hasCircle;
+}
+
+/**
+ * Detect duration text in corner (usually bottom-right)
+ */
+function detectDurationText(img: cv.Mat): boolean {
+  const rows = img.rows;
+  const cols = img.cols;
+
+  // Bottom-right corner region
   const roi = img.getRegion(new cv.Rect(
-    Math.floor(cols * 0.6),
-    Math.floor(rows * 0.7),
-    Math.floor(cols * 0.4),
-    Math.floor(rows * 0.3)
+    Math.floor(cols * 0.5),
+    Math.floor(rows * 0.5),
+    Math.floor(cols * 0.5),
+    Math.floor(rows * 0.5)
   ));
 
   const gray = roi.bgrToGray();
   const edges = gray.canny(50, 150);
   const edgePixels = edges.countNonZero();
 
-  // If there's moderate edge activity in bottom-right, likely has duration text
-  const result = edgePixels / (roi.rows * roi.cols) > 0.02;
+  // Duration text area has moderate edge activity
+  const result = edgePixels / (roi.rows * roi.cols) > 0.01;
 
   roi.delete();
   return result;
