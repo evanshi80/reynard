@@ -17,7 +17,7 @@ export interface MessageBlock {
   y: number;
   w: number;
   h: number;
-  type: 'text' | 'image' | 'file' | 'mixed';
+  type: 'text' | 'image' | 'file' | 'video' | 'mixed';
   crop?: cv.Mat;
 }
 
@@ -208,12 +208,15 @@ export function isImageRegion(img: cv.Mat): boolean {
 /**
  * Detect if a region is likely a file attachment based on icon patterns
  * WeChat file messages have distinctive colored icons:
- * - Excel: green icon with white "X"
- * - PDF: red icon with "PDF" text
+ * - Excel: green icon
+ * - PDF: red icon
  * - Word: blue icon
+ * - PPT: orange icon
+ * - ZIP/RAR: yellow icon
+ * - TXT: gray icon
  */
 export function isFileRegion(img: cv.Mat): boolean {
-  // Method 1: Detect file icon colors (green=Excel, red=PDF, blue=Word)
+  // Method 1: Detect file icon colors
   const fileColor = detectFileIconColor(img);
 
   // Method 2: Look for rectangular contours (document shape)
@@ -242,19 +245,25 @@ export function isFileRegion(img: cv.Mat): boolean {
  * - Excel: green (hue 35-85)
  * - PDF: red/orange (hue 0-30 or 150-180)
  * - Word: blue (hue 90-130)
+ * - PPT: orange (hue 10-40)
+ * - ZIP/RAR: yellow/gold (hue 20-50, high saturation)
+ * - TXT: gray (low saturation, medium value)
  */
-function detectFileIconColor(img: cv.Mat): 'excel' | 'pdf' | 'word' | null {
+function detectFileIconColor(img: cv.Mat): FileType | null {
   const hsv = img.cvtColor(cv.COLOR_BGR2HSV);
 
   // Check for each color type
   const colors = [
     { name: 'excel' as const, lower: new cv.Vec3(35, 50, 50), upper: new cv.Vec3(85, 255, 255) },
-    { name: 'red' as const, lower: new cv.Vec3(0, 50, 50), upper: new cv.Vec3(15, 255, 255) },
-    { name: 'red2' as const, lower: new cv.Vec3(160, 50, 50), upper: new cv.Vec3(180, 255, 255) },
+    { name: 'pdf' as const, lower: new cv.Vec3(0, 50, 50), upper: new cv.Vec3(15, 255, 255) },
+    { name: 'pdf2' as const, lower: new cv.Vec3(160, 50, 50), upper: new cv.Vec3(180, 255, 255) },
     { name: 'word' as const, lower: new cv.Vec3(90, 40, 40), upper: new cv.Vec3(130, 255, 255) },
+    { name: 'ppt' as const, lower: new cv.Vec3(10, 60, 60), upper: new cv.Vec3(40, 255, 255) },
+    { name: 'zip' as const, lower: new cv.Vec3(15, 70, 70), upper: new cv.Vec3(50, 255, 255) },
+    { name: 'txt' as const, lower: new cv.Vec3(0, 0, 100), upper: new cv.Vec3(180, 30, 200) },
   ];
 
-  let bestMatch: 'excel' | 'pdf' | 'word' | null = null;
+  let bestMatch: FileType | null = null;
   let bestRatio = 0;
 
   for (const color of colors) {
@@ -266,13 +275,90 @@ function detectFileIconColor(img: cv.Mat): 'excel' | 'pdf' | 'word' | null {
     if (ratio > 0.01 && ratio > bestRatio) {
       bestRatio = ratio;
       if (color.name === 'excel') bestMatch = 'excel';
-      else if (color.name === 'red' || color.name === 'red2') bestMatch = 'pdf';
+      else if (color.name === 'pdf' || color.name === 'pdf2') bestMatch = 'pdf';
       else if (color.name === 'word') bestMatch = 'word';
+      else if (color.name === 'ppt') bestMatch = 'ppt';
+      else if (color.name === 'zip') bestMatch = 'zip';
+      else if (color.name === 'txt') bestMatch = 'txt';
     }
   }
 
   hsv.delete();
   return bestMatch;
+}
+
+export type FileType = 'excel' | 'pdf' | 'word' | 'ppt' | 'zip' | 'txt';
+
+/**
+ * Detect video messages in WeChat
+ * Videos typically have:
+ * - Rectangular thumbnail (16:9 or 4:3 aspect ratio)
+ * - Play button (triangle or circle)
+ * - Duration text in corner
+ */
+export function isVideoRegion(img: cv.Mat): boolean {
+  const rows = img.rows;
+  const cols = img.cols;
+  const ratio = cols / rows;
+
+  // Check aspect ratio (videos are usually 16:9 or 4:3)
+  const hasVideoRatio = ratio > 1.2 && ratio < 2.2;
+
+  // Look for play button shape (triangle or circle)
+  const hasPlayButton = detectPlayButton(img);
+
+  // Check for duration text area (usually in bottom-right corner)
+  const hasDurationArea = detectDurationArea(img);
+
+  // Video if: has video ratio AND (play button OR duration)
+  return hasVideoRatio && (hasPlayButton || hasDurationArea);
+}
+
+/**
+ * Detect play button shape (triangle ▶ or circle)
+ */
+function detectPlayButton(img: cv.Mat): boolean {
+  // Convert to gray and find edges
+  const gray = img.bgrToGray();
+  const edges = gray.canny(50, 150);
+
+  // Find contours
+  const contours = edges.findContours(cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  for (const contour of contours) {
+    const approx = contour.approxPolyDP(0.04 * contour.arcLength());
+    // Triangle has 3 points, circle has many but small area
+    if (approx.length === 3 || (approx.length > 8 && contour.area() < 1000)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Detect duration text area (usually bottom-right corner)
+ */
+function detectDurationArea(img: cv.Mat): boolean {
+  // Check bottom-right region for text-like patterns
+  const rows = img.rows;
+  const cols = img.cols;
+  const roi = img.getRegion(new cv.Rect(
+    Math.floor(cols * 0.6),
+    Math.floor(rows * 0.7),
+    Math.floor(cols * 0.4),
+    Math.floor(rows * 0.3)
+  ));
+
+  const gray = roi.bgrToGray();
+  const edges = gray.canny(50, 150);
+  const edgePixels = edges.countNonZero();
+
+  // If there's moderate edge activity in bottom-right, likely has duration text
+  const result = edgePixels / (roi.rows * roi.cols) > 0.02;
+
+  roi.delete();
+  return result;
 }
 
 // Keep alias for backward compatibility
@@ -438,9 +524,13 @@ export function preprocessForOCR(mat: cv.Mat): cv.Mat {
 
 /**
  * Detect message type for each block
+ * Priority: video > file > image > text
  */
 export function detectBlockType(img: cv.Mat, block: MessageBlock): MessageBlock {
   const crop = cropRegion(img, block);
+
+  // Check for video characteristics (rectangular + play button/duration)
+  const isVideo = isVideoRegion(crop);
 
   // Check for image characteristics
   const isImg = isImageRegion(crop);
@@ -449,7 +539,9 @@ export function detectBlockType(img: cv.Mat, block: MessageBlock): MessageBlock 
   const isFile = isFileRegion(crop);
 
   let type: MessageBlock['type'] = 'text';
-  if (isImg && isFile) {
+  if (isVideo) {
+    type = 'video';
+  } else if (isImg && isFile) {
     type = 'mixed';
   } else if (isImg) {
     type = 'image';
