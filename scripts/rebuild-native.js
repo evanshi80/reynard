@@ -13,6 +13,7 @@ const NATIVE_MODULES = [
   'koffi',
   'better-sqlite3',
   'sharp',
+  'opencv4nodejs-prebuilt',
 ];
 
 console.log('=== Rebuilding Native Modules ===\n');

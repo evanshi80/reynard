@@ -26,3 +26,12 @@ export {
 
 // Template manager
 export { templateManager, type TemplateInfo } from './templateManager';
+
+// V2 Processor: OpenCV + OCR + VLM pipeline
+export {
+  processScreenshotV2,
+  detectBlockTypes,
+  findAttachmentIcons,
+  type V2Message,
+  type V2ProcessResult,
+} from './v2Processor';
