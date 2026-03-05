@@ -2,15 +2,18 @@
  * Template Manager for WeChat UI elements
  *
  * Loads and caches template images for matching
+ * Uses Sharp for image loading
  */
-import cv from 'opencv4nodejs-prebuilt';
+import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs';
 import { logger } from '../utils/logger.js';
 
 export interface TemplateInfo {
   name: string;
-  mat: cv.Mat;
+  data: Buffer;
+  width: number;
+  height: number;
   path: string;
 }
 
@@ -48,11 +51,17 @@ class TemplateManager {
       const templatePath = path.join(TEMPLATE_DIR, filename);
       if (fs.existsSync(templatePath)) {
         try {
-          const mat = cv.imread(templatePath);
-          if (!mat.empty) {
-            this.templates.set(name, { name, mat, path: templatePath });
-            logger.info(`[TemplateManager] Loaded template: ${name}`);
-          }
+          const metadata = await sharp(templatePath).metadata();
+          const data = await sharp(templatePath).raw().toBuffer();
+
+          this.templates.set(name, {
+            name,
+            data,
+            width: metadata.width || 0,
+            height: metadata.height || 0,
+            path: templatePath
+          });
+          logger.info(`[TemplateManager] Loaded template: ${name}`);
         } catch (err) {
           logger.error(`[TemplateManager] Failed to load template ${name}:`, err);
         }
@@ -65,9 +74,8 @@ class TemplateManager {
     logger.info(`[TemplateManager] Loaded ${this.templates.size} templates`);
   }
 
-  getTemplate(name: string): cv.Mat | null {
-    const template = this.templates.get(name);
-    return template ? template.mat : null;
+  getTemplate(name: string): TemplateInfo | null {
+    return this.templates.get(name) || null;
   }
 
   hasTemplate(name: string): boolean {
@@ -78,18 +86,25 @@ class TemplateManager {
     return Array.from(this.templates.keys());
   }
 
-  addTemplate(name: string, imagePath: string): void {
-    const mat = cv.imread(imagePath);
-    if (!mat.empty) {
-      this.templates.set(name, { name, mat, path: imagePath });
+  async addTemplate(name: string, imagePath: string): Promise<void> {
+    try {
+      const metadata = await sharp(imagePath).metadata();
+      const data = await sharp(imagePath).raw().toBuffer();
+
+      this.templates.set(name, {
+        name,
+        data,
+        width: metadata.width || 0,
+        height: metadata.height || 0,
+        path: imagePath
+      });
       logger.info(`[TemplateManager] Added template: ${name}`);
+    } catch (err) {
+      logger.error(`[TemplateManager] Failed to add template ${name}:`, err);
     }
   }
 
   dispose(): void {
-    for (const template of this.templates.values()) {
-      template.mat.delete();
-    }
     this.templates.clear();
     this.initialized = false;
   }

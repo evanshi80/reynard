@@ -35,7 +35,6 @@
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
     "koffi": "^2.15.1",
-    "opencv4nodejs-prebuilt": "^5.6.0",
     "openai": "^6.18.0",
     "robotjs": "^0.6.0",
     "screenshot-desktop": "^1.15.3",

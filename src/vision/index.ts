@@ -1,33 +1,21 @@
 export { createVisionProvider, VisionProvider } from './providers';
 export { OllamaProvider, OpenAIProvider, AnthropicProvider, DisabledProvider } from './providers';
 
-// OpenCV-based vision processor
+// Sharp-based vision processor (works with Node 22)
 export {
   segmentMessageStrips,
-  refineBlockBoundaries,
-  isImageRegion,
-  isFileRegion,
-  matchTemplate,
-  findAllTemplateMatches,
-  cropRegion,
-  matToBase64,
-  base64ToMat,
-  loadImage,
-  saveImage,
-  resizeImage,
-  preprocessForOCR,
-  detectBlockType,
   processScreenshot,
-  disposeImage,
-  type MessageBlock,
-  type SegmentResult,
-  type TemplateMatchResult,
-} from './opencvProcessor';
+  cropBlock,
+  resizeForVLM,
+  imageToBase64,
+  type MessageBlock as SharpMessageBlock,
+  type SegmentResult as SharpSegmentResult,
+} from './sharpProcessor';
 
 // Template manager
 export { templateManager, type TemplateInfo } from './templateManager';
 
-// V2 Processor: OpenCV + OCR + VLM pipeline
+// V2 Processor: Sharp + OCR + VLM pipeline
 export {
   processScreenshotV2,
   detectBlockTypes,
