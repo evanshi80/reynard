@@ -499,7 +499,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
 
                 logger.debug(`[CP check] minEpoch=${minEpoch}, maxEpoch=${maxEpoch}, watermark=${watermarkEpoch}, reached=${reachedWatermark}, hasNew=${thisHasNew}`);
 
-                if (reachedWatermark) {
+                if (reachedWatermark && !config.vision.v2Enabled) {
                   if (!thisHasNew && scrollCount === 0) {
                     shouldStop = true;
                     newestCheckpoint = lastCheckpoint;
@@ -530,7 +530,7 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
 
         // V2 Mode: Use Sharp + AHK directly (replaces VLM)
         if (config.vision.v2Enabled) {
-          if (shouldProcess) {
+          if (!shouldStop) {
             try {
               logger.info(`[patrol] V2: Processing screenshot ${screenshotIndex} with Sharp + AHK...`);
               const chatArea = getCapturer().getChatAreaRect();

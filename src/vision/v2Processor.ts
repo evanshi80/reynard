@@ -19,7 +19,7 @@ import {
   processScreenshot,
   MessageBlock,
 } from './sharpProcessor.js';
-import { saveAttachmentFull, copyMessageText } from '../wechat/ahkBridge.js';
+import { saveAttachmentFull, copyMessageText, activateWeChat } from '../wechat/ahkBridge.js';
 
 export interface V2Message {
   sender?: string;
@@ -77,9 +77,14 @@ export async function processScreenshotV2(
   const messages: V2Message[] = [];
 
   for (const block of blocks) {
+      // Activate window before clicking
+      await activateWeChat();
+      await new Promise(r => setTimeout(r, 300));
     try {
       // Calculate absolute screen coordinates for click
+      // Need chat area offset (sidebar width) to map screenshot coords to screen coords
       const chatStartX = windowRect.chatOffsetX || 0;
+      // Y offset for header
       const chatStartY = windowRect.chatOffsetY || 0;
       const clickX = windowRect.x + chatStartX + block.x + Math.round(block.w / 2);
       const clickY = windowRect.y + chatStartY + block.y + Math.round(block.h / 2);
