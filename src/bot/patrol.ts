@@ -9,6 +9,7 @@ import { getCapturer } from '../capture/screenshot';
 import { recognizeTimestamps } from '../wechat/ocr';
 import { getDatabase } from '../database/client';
 import { getVlmCycle } from '../vision/vlmCycle';
+import { processScreenshotV2, getStoredTextMessages, clearStoredTextMessages } from '../vision/v2Processor';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -576,6 +577,28 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
             await getVlmCycle().processSingleScreenshot(filepath, target.name, target.category, vlmResult.messages);
 
             logger.debug(`[patrol] VLM processed ${vlmResult.messages.length} messages`);
+
+        // V2: Use Sharp + AHK for block processing
+        if (config.vision.v2Enabled && shouldCallVlm) {
+          try {
+            logger.info('[patrol] V2: Processing blocks with Sharp + AHK...');
+            const v2Result = await processScreenshotV2(filepath, target.name, { x: win.x, y: win.y, width: win.width, height: win.height });
+
+            // Log copied text messages
+            const storedTexts = getStoredTextMessages();
+            if (storedTexts.length > 0) {
+              logger.info('[patrol] V2: Text messages copied:');
+              for (const msg of storedTexts) {
+                logger.info('[patrol] V2 TEXT: ' + (msg.content || '').slice(0, 200));
+              }
+            }
+
+            logger.info('[patrol] V2: Processed ' + v2Result.messages.length + ' blocks');
+          } catch (error) {
+            logger.error('[patrol] V2 processing failed:', error);
+          }
+        }
+
           } catch (error) {
             logger.error(`[patrol] VLM failed for screenshot ${screenshotIndex}:`, error);
           }

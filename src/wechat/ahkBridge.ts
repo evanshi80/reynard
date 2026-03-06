@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import logger from '../utils/logger';
+import { WindowFinder } from '../capture/windowFinder';
 
 export interface AhkResult {
   success: boolean;
@@ -80,6 +81,30 @@ function executeAhk(args: string[], timeoutMs: number = 15000, retries: number =
 export async function activateWeChat(): Promise<AhkResult> {
   return executeAhk(['activate']);
 }
+/**
+ * Search for a contact/group and open it
+ */
+export async function searchAndOpen(name: string): Promise<AhkResult> {
+  // First activate
+  await activateWeChat();
+  // Type search
+  await typeSearch(name);
+  // Open first result
+  return openFirstResult(name);
+}
+
+/**
+ * Scroll to bottom of chat
+ */
+export async function scrollToBottom(): Promise<AhkResult> {
+  const win = new WindowFinder().findWeChatWindow();
+  if (!win) {
+    return { success: false, action: 'scrollToBottom', message: 'No window' };
+  }
+  // Use Ctrl+End to go to bottom
+  return scrollToTop(win.x, win.y, win.width, win.height);
+}
+
 
 export async function typeSearch(text: string): Promise<AhkResult> {
   logger.info(`[ahkBridge] typeSearch called with: ${text}`);
