@@ -63,7 +63,7 @@ function generateHash(content: string): string {
 export async function processScreenshotV2(
   screenshotPath: string,
   targetName: string,
-  windowRect: { x: number; y: number; width: number; height: number }
+  windowRect: { x: number; y: number; width: number; height: number; chatOffsetX?: number; chatOffsetY?: number }
 ): Promise<V2ProcessResult> {
   logger.info('[V2] Processing: ' + screenshotPath);
 
@@ -79,8 +79,10 @@ export async function processScreenshotV2(
   for (const block of blocks) {
     try {
       // Calculate absolute screen coordinates for click
-      const clickX = windowRect.x + block.x + Math.round(block.w / 2);
-      const clickY = windowRect.y + block.y + Math.round(block.h / 2);
+      const chatStartX = windowRect.chatOffsetX || 0;
+      const chatStartY = windowRect.chatOffsetY || 0;
+      const clickX = windowRect.x + chatStartX + block.x + Math.round(block.w / 2);
+      const clickY = windowRect.y + chatStartY + block.y + Math.round(block.h / 2);
 
       if (block.type === 'image' || block.type === 'video' || block.type === 'file') {
         // Generate unique filename based on position + timestamp

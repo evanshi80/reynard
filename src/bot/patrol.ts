@@ -533,7 +533,8 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
           if (shouldProcess) {
             try {
               logger.info(`[patrol] V2: Processing screenshot ${screenshotIndex} with Sharp + AHK...`);
-              const v2Result = await processScreenshotV2(filepath, target.name, { x: win.x, y: win.y, width: win.width, height: win.height });
+              const chatArea = getCapturer().getChatAreaRect();
+              const v2Result = await processScreenshotV2(filepath, target.name, { x: win.x, y: win.y, width: win.width, height: win.height, chatOffsetX: chatArea.x, chatOffsetY: chatArea.y });
 
               // Log text messages
               const storedTexts = getStoredTextMessages();
