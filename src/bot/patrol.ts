@@ -518,17 +518,42 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
           }
         }
 
-        // Only call VLM if:
+        // Determine if we need to process this screenshot:
         // 1. has new messages OR
         // 2. no checkpoint yet (first patrol) OR
         // 3. no timestamps found but this is the first screenshot (scrollCount=0, could have attachments like images)
-        const shouldCallVlm = config.vision.v2Enabled && !shouldStop && (
+        const shouldProcess = !shouldStop && (
           screenshotHasNewMessages ||
           !lastCheckpoint ||
           (timestampResults.length === 0 && scrollCount === 0)
         );
 
-        if (shouldCallVlm) {
+        // V2 Mode: Use Sharp + AHK directly (replaces VLM)
+        if (config.vision.v2Enabled) {
+          if (shouldProcess) {
+            try {
+              logger.info(`[patrol] V2: Processing screenshot ${screenshotIndex} with Sharp + AHK...`);
+              const v2Result = await processScreenshotV2(filepath, target.name, { x: win.x, y: win.y, width: win.width, height: win.height });
+
+              // Log text messages
+              const storedTexts = getStoredTextMessages();
+              if (storedTexts.length > 0) {
+                logger.info('[patrol] V2: Text messages copied:');
+                for (const msg of storedTexts) {
+                  logger.info('[patrol] V2 TEXT: ' + (msg.content || '').slice(0, 200));
+                }
+              }
+
+              logger.info('[patrol] V2: Processed ' + v2Result.messages.length + ' blocks');
+            } catch (error) {
+              logger.error('[patrol] V2 processing failed:', error);
+            }
+          } else if (!screenshotHasNewMessages && lastCheckpoint) {
+            logger.info(`[patrol] No new messages in screenshot ${screenshotIndex}, skipping V2`);
+          }
+        }
+        // Legacy Mode: Use VLM
+        else if (shouldProcess) {
           try {
             // Step 1: Get VLM result with bounds
             logger.info(`[patrol] Step 1: Calling VLM for screenshot ${screenshotIndex} (has new: ${screenshotHasNewMessages})...`);
@@ -541,19 +566,12 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
             for (const msg of vlmResult.messages) {
               if (msg.type === 'image' || msg.type === 'file') {
                 if (msg.bounds) {
-                  // Use upper-left offset for image/file clicks (more reliable than center)
-                  // Small offset from top-left to avoid clicking on edge/border
                   const offsetX = Math.min(40, Math.round(msg.bounds.w * 0.15));
                   const offsetY = Math.min(40, Math.round(msg.bounds.h * 0.15));
-
-                  // Calculate absolute screen position
-                  // The screenshot is captured at win.x, win.y (full window)
-                  // bounds.x/y from VLM are relative to the screenshot (same coordinate system)
-                  // So: screen_coord = win_coord + bounds_coord
                   const clickX = win.x + msg.bounds.x + offsetX;
                   const clickY = win.y + msg.bounds.y + offsetY;
 
-                  logger.info(`[patrol] Saving attachment at (${clickX}, ${clickY}) win=(${win.x},${win.y}) bounds=${JSON.stringify(msg.bounds)} offset=(${offsetX},${offsetY})`);
+                  logger.info(`[patrol] Saving attachment at (${clickX}, ${clickY})`);
 
                   try {
                     await activateWeChat();
@@ -572,33 +590,11 @@ async function patrolTarget(target: { name: string; category: string }, win: { x
             }
             logger.info(`[patrol] Step 2: Attachment save complete for ${screenshotIndex}`);
 
-            // Step 3: Process messages (dedup, save to DB) - pass existing messages to avoid calling VLM again
+            // Step 3: Process messages (dedup, save to DB)
             logger.info(`[patrol] Step 3: Processing messages for ${screenshotIndex}...`);
             await getVlmCycle().processSingleScreenshot(filepath, target.name, target.category, vlmResult.messages);
 
             logger.debug(`[patrol] VLM processed ${vlmResult.messages.length} messages`);
-
-        // V2: Use Sharp + AHK for block processing
-        if (config.vision.v2Enabled && shouldCallVlm) {
-          try {
-            logger.info('[patrol] V2: Processing blocks with Sharp + AHK...');
-            const v2Result = await processScreenshotV2(filepath, target.name, { x: win.x, y: win.y, width: win.width, height: win.height });
-
-            // Log copied text messages
-            const storedTexts = getStoredTextMessages();
-            if (storedTexts.length > 0) {
-              logger.info('[patrol] V2: Text messages copied:');
-              for (const msg of storedTexts) {
-                logger.info('[patrol] V2 TEXT: ' + (msg.content || '').slice(0, 200));
-              }
-            }
-
-            logger.info('[patrol] V2: Processed ' + v2Result.messages.length + ' blocks');
-          } catch (error) {
-            logger.error('[patrol] V2 processing failed:', error);
-          }
-        }
-
           } catch (error) {
             logger.error(`[patrol] VLM failed for screenshot ${screenshotIndex}:`, error);
           }
