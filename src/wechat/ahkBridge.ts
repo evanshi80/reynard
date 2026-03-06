@@ -175,6 +175,7 @@ export async function saveAttachment(msgX: number, msgY: number, savePath?: stri
   }
   return executeAhk(args);
 }
+/** * Full save attachment workflow: right-click -> 另存为 -> enter filename -> save * @param msgX - X coordinate within chat window * @param msgY - Y coordinate within chat window * @param filename - Optional filename to type in save dialog */export async function saveAttachmentFull(msgX: number, msgY: number, filename?: string): Promise<AhkResult> {  const args = ['save_attachment_full', String(msgX), String(msgY)];  if (filename) {    args.push(filename);  }  return executeAhk(args);}/** * Copy message text by double-clicking and pressing Ctrl+C * @param msgX - X coordinate within chat window * @param msgY - Y coordinate within chat window */export async function copyMessageText(msgX: number, msgY: number): Promise<AhkResult> {  const args = ['double_click_copy', String(msgX), String(msgY)];  return executeAhk(args);}
 
 /**
  * Scroll up in chat history

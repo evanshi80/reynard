@@ -209,6 +209,44 @@ else if (action = "save_attachment") {
 
     OutputJSON(true, "save_attachment", "Right-clicked at " . msgX . "," . msgY)
 }
+else if (action = "save_attachment_full") {
+    ; Full save-as workflow: right-click -> 另存为 -> Enter -> type filename -> Enter
+    msgX := A_Args.Length >= 2 ? Integer(A_Args[2]) : 0
+    msgY := A_Args.Length >= 3 ? Integer(A_Args[3]) : 0
+    filename := A_Args.Length >= 4 ? A_Args[4] : ""
+
+    if (msgX <= 0 or msgY <= 0) {
+        OutputJSON(false, "save_attachment_full", "Invalid coordinates")
+        ExitApp 1
+    }
+
+    ; Right-click to open context menu
+    Click msgX, msgY, "Right"
+    Sleep 300
+
+    ; Type "另存为" to search for the menu item
+    Sleep 200
+    Send "另存为"
+    Sleep 500
+
+    ; Press Enter to confirm
+    Send "{Enter}"
+    Sleep 800
+
+    ; Now Windows Save As dialog should be open
+    ; Type the filename
+    if (filename != "") {
+        Send filename
+        Sleep 300
+    }
+
+    ; Press Enter to save
+    Send "{Enter}"
+    Sleep 500
+
+    OutputJSON(true, "save_attachment_full", "Saved file: " . filename)
+}
+else if (action = "double_click_copy") {    ; Double-click on message to select, then Ctrl+C to copy    msgX := A_Args.Length >= 2 ? Integer(A_Args[2]) : 0    msgY := A_Args.Length >= 3 ? Integer(A_Args[3]) : 0    if (msgX <= 0 or msgY <= 0) {        OutputJSON(false, "double_click_copy", "Invalid coordinates")        ExitApp 1    }    ; Clear clipboard first    A_Clipboard := ""    Sleep 200    ; Double-click to select message    Click msgX, msgY, "Double"    Sleep 400    ; Ctrl+C to copy    Send "^c"    Sleep 500    OutputJSON(true, "double_click_copy", "Double-clicked at " . msgX . "," . msgY)}
 else if (action = "read_clipboard") {
     ; Read clipboard content and output as JSON
     Sleep 200
