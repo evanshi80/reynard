@@ -1,13 +1,15 @@
 /**
- * V2 Processor: Sharp Segmentation + OCR + VLM
+ * V2 Processor: Sharp Segmentation + AHK Actions
  *
  * Flow:
  * 1. Sharp segment screenshot into message blocks
  * 2. For each block:
- *    - text: double-click + Ctrl+C to copy -> save to memory
+ *    - text: double-click + Ctrl+C to copy -> print to log
  *    - image: AHK right-click save as -> save to disk with hash filename
  *    - file: AHK right-click save as -> save to disk with hash filename
  *    - video: AHK right-click save as -> save to disk with hash filename
+ *
+ * NOTE: This is independent of VLM Cycle. No VLM calls here.
  */
 import path from 'path';
 import fs from 'fs';
@@ -16,14 +18,11 @@ import { logger } from '../utils/logger.js';
 import {
   processScreenshot,
   MessageBlock,
-  imageToBase64,
-  cropBlock,
 } from './sharpProcessor.js';
-import { createVisionProvider } from './providers.js';
 import { saveAttachmentFull, copyMessageText } from '../wechat/ahkBridge.js';
 
 export interface V2Message {
-  sender: string;
+  sender?: string;
   content: string;
   time?: string;
   type: 'text' | 'image' | 'file' | 'video' | 'mixed';
@@ -36,7 +35,10 @@ export interface V2ProcessResult {
   screenshotPath: string;
 }
 
+// In-memory store for copied text messages (for verification)
 const textMessageStore: V2Message[] = [];
+
+// Download directory for attachments
 const ATTACHMENT_DIR = path.join(process.cwd(), 'data', 'attachments');
 
 function ensureAttachmentDir(): void {
@@ -49,155 +51,129 @@ function generateHash(content: string): string {
   return crypto.createHash('md5').update(content).digest('hex').slice(0, 12);
 }
 
+/**
+ * Process a single screenshot using V2 pipeline (Sharp + AHK only, no VLM)
+ *
+ * This is the main entry point called from patrol:
+ * 1. Segment screenshot into message blocks using Sharp
+ * 2. For each block:
+ *    - image/video/file: right-click -> save as to disk
+ *    - text: double-click -> copy to clipboard -> log to console
+ */
 export async function processScreenshotV2(
   screenshotPath: string,
   targetName: string,
   windowRect: { x: number; y: number; width: number; height: number }
 ): Promise<V2ProcessResult> {
-  logger.info('[V2Processor] Processing: ' + screenshotPath);
+  logger.info('[V2] Processing: ' + screenshotPath);
 
+  // Step 1: Sharp segment screenshot into message blocks
   const { blocks } = await processScreenshot(screenshotPath);
-  logger.info('[V2Processor] Found ' + blocks.length + ' message blocks');
+  logger.info('[V2] Found ' + blocks.length + ' message blocks');
+
+  // Step 2: Process each block with AHK
+  ensureAttachmentDir();
 
   const messages: V2Message[] = [];
 
-  const vision = createVisionProvider();
-  if (!vision || vision.constructor.name === 'DisabledProvider') {
-    logger.warn('[V2Processor] No vision provider available, skipping VLM');
-  }
-
-  if (vision) {
-    try {
-      const tempPaths: string[] = [];
-
-      for (const block of blocks) {
-        const tempPath = path.join(
-          process.cwd(),
-          'data',
-          'screenshots',
-          'vlm',
-          'block_' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.jpg'
-        );
-        await cropBlock(screenshotPath, block, tempPath);
-        tempPaths.push(tempPath);
-      }
-
-      const buffers = tempPaths.map(p => fs.readFileSync(p));
-
-      const result = await vision.recognize(buffers, {
-        targetName,
-        category: '',
-        promptMode: 'v2',
-      });
-
-      for (const tempPath of tempPaths) {
-        try { fs.unlinkSync(tempPath); } catch (e) { /* ignore */ }
-      }
-
-      if (result.messages && result.messages.length > 0) {
-        for (let i = 0; i < Math.min(result.messages.length, blocks.length); i++) {
-          const vlmMsg = result.messages[i];
-          const block = blocks[i];
-
-          let type: V2Message['type'] = 'text';
-          let content = vlmMsg.content || '';
-
-          if (block.type === 'image') {
-            type = 'image';
-            content = '【图片】' + content;
-          } else if (block.type === 'video') {
-            type = 'video';
-            content = '【视频】' + content;
-          } else if (block.type === 'file') {
-            type = 'file';
-            content = '【文件】';
-          }
-
-          messages.push({
-            sender: vlmMsg.sender || '',
-            content,
-            time: vlmMsg.time || undefined,
-            type,
-            bounds: { x: block.x, y: block.y, w: block.w, h: block.h },
-          });
-        }
-      }
-
-      logger.info('[V2Processor] VLM recognized ' + messages.length + ' messages');
-    } catch (error) {
-      logger.error('[V2Processor] VLM recognition failed:', error);
-    }
-  }
-
-  ensureAttachmentDir();
-
   for (const block of blocks) {
     try {
+      // Calculate absolute screen coordinates for click
       const clickX = windowRect.x + block.x + Math.round(block.w / 2);
       const clickY = windowRect.y + block.y + Math.round(block.h / 2);
 
       if (block.type === 'image' || block.type === 'video' || block.type === 'file') {
+        // Generate unique filename based on position + timestamp
         const hash = generateHash(targetName + '_' + block.x + '_' + block.y + '_' + Date.now());
         const ext = block.type === 'image' ? 'jpg' : block.type === 'video' ? 'mp4' : 'dat';
         const filename = hash + '.' + ext;
 
-        logger.info('[V2Processor] Saving ' + block.type + ' at (' + clickX + ', ' + clickY + '), filename: ' + filename);
+        logger.info('[V2] Saving ' + block.type + ' at (' + clickX + ', ' + clickY + '), file: ' + filename);
 
+        // Execute full save-as workflow
         const result = await saveAttachmentFull(clickX, clickY, filename);
 
         if (result.success) {
           const savedPath = path.join(ATTACHMENT_DIR, filename);
-          logger.info('[V2Processor] ' + block.type + ' saved: ' + savedPath);
+          logger.info('[V2] ' + block.type + ' saved: ' + savedPath);
 
-          const msg = messages.find(m => m.bounds.x === block.x && m.bounds.y === block.y);
-          if (msg) {
-            msg.filePath = savedPath;
-          }
+          messages.push({
+            type: block.type,
+            content: '【' + block.type + '】',
+            bounds: { x: block.x, y: block.y, w: block.w, h: block.h },
+            filePath: savedPath,
+          });
         } else {
-          logger.error('[V2Processor] Failed to save ' + block.type + ': ' + result.message);
+          logger.error('[V2] Failed to save ' + block.type + ': ' + result.message);
         }
       } else if (block.type === 'text') {
-        logger.info('[V2Processor] Copying text at (' + clickX + ', ' + clickY + ')');
+        // For text messages, double-click and copy to clipboard
+        logger.info('[V2] Copying text at (' + clickX + ', ' + clickY + ')');
 
         const result = await copyMessageText(clickX, clickY);
 
         if (result.success) {
-          logger.info('[V2Processor] Text copied from block at (' + block.x + ', ' + block.y + ')');
+          logger.info('[V2] Text copied from block at (' + block.x + ', ' + block.y + ')');
 
-          const msg = messages.find(m => m.bounds.x === block.x && m.bounds.y === block.y);
-          if (msg) {
-            textMessageStore.push(msg);
-            logger.info('[V2Processor] Text message stored in memory (total: ' + textMessageStore.length + ')');
-          }
+          // Store for later retrieval
+          const msg: V2Message = {
+            type: 'text',
+            content: '(copied to clipboard)',
+            bounds: { x: block.x, y: block.y, w: block.w, h: block.h },
+          };
+          textMessageStore.push(msg);
+
+          // Log the copied text (for POC verification)
+          logger.info('[V2] ========== TEXT MESSAGE START ==========');
+          logger.info('[V2] BLOCK: x=' + block.x + ', y=' + block.y + ', w=' + block.w + ', h=' + block.h);
+          logger.info('[V2] TEXT: (copied to clipboard - check WeChat for content)');
+          logger.info('[V2] ========== TEXT MESSAGE END ==========');
+
+          messages.push(msg);
         } else {
-          logger.error('[V2Processor] Failed to copy text: ' + result.message);
+          logger.error('[V2] Failed to copy text: ' + result.message);
         }
       }
     } catch (error) {
-      logger.error('[V2Processor] Error processing block type ' + block.type + ':', error);
+      logger.error('[V2] Error processing block type ' + block.type + ':', error);
     }
   }
+
+  logger.info('[V2] Processed ' + messages.length + ' blocks');
 
   return { messages, screenshotPath };
 }
 
+/**
+ * Get all stored text messages (from clipboard copy)
+ */
 export function getStoredTextMessages(): V2Message[] {
   return [...textMessageStore];
 }
 
+/**
+ * Clear stored text messages
+ */
 export function clearStoredTextMessages(): void {
   textMessageStore.length = 0;
 }
 
+/**
+ * Quick block type detection using Sharp only
+ * Useful for filtering before full processing
+ */
 export async function detectBlockTypes(screenshotPath: string): Promise<MessageBlock[]> {
   const { blocks } = await processScreenshot(screenshotPath);
   return blocks;
 }
 
+/**
+ * Find attachment icons using template matching (not implemented with Sharp)
+ */
 export function findAttachmentIcons(
   screenshotPath: string,
   iconType: 'image' | 'file' | 'voice' | 'video'
 ): Array<{ x: number; y: number; w: number; h: number; score: number }> {
-  logger.warn('[V2Processor] Template matching not implemented with Sharp');
+  logger.warn('[V2] Template matching not implemented with Sharp');
   return [];
 }
